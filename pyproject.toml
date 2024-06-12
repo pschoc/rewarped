@@ -64,6 +64,7 @@ ignore = [
     "F405", # Related to use of wildcard imports
     "F811", # Warp often uses overloads
     "B007", # Loop control variable not used within loop body
+    "C408", # Unnecessary `dict` call (rewrite as a literal)
 ]
 
 [tool.ruff.lint.pydocstyle]
