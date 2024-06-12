@@ -217,6 +217,50 @@ class Environment:
 
     def create_modelbuilder(self):
         builder = wp.sim.ModelBuilder(up_vector=compute_up_vector(self.up_axis), gravity=self.gravity)
+
+        default_modelbuilder_settings = dict(
+            # Default particle settings
+            default_particle_radius=0.1,
+            # particle_max_velocity=1e5,  # set in create_model instead
+            # Default triangle soft mesh settings
+            default_tri_ke=100.0,
+            default_tri_ka=100.0,
+            default_tri_kd=10.0,
+            default_tri_drag=0.0,
+            default_tri_lift=0.0,
+            # Default distance constraint properties
+            default_spring_ke=100.0,
+            default_spring_kd=0.0,
+            # Default edge bending properties
+            default_edge_ke=100.0,
+            default_edge_kd=0.0,
+            # Default rigid shape contact material properties
+            default_shape_ke=1.0e5,
+            default_shape_kd=1000.0,
+            default_shape_kf=1000.0,
+            default_shape_ka=0.0,
+            default_shape_mu=0.5,
+            default_shape_restitution=0.0,
+            default_shape_density=1000.0,
+            default_shape_thickness=1e-5,
+            # Default joint settings
+            default_joint_limit_ke=100.0,
+            default_joint_limit_kd=1.0,
+            # Maximum number of soft contacts that can be registered
+            soft_contact_max=64 * 1024,
+            # maximum number of contact points to generate per mesh shape
+            rigid_mesh_contact_max=0,  # 0 = unlimited
+            # contacts to be generated within the given distance margin to be generated at
+            # every simulation substep (can be 0 if only one PBD solver iteration is used)
+            rigid_contact_margin=0.1,
+            # number of rigid contact points to allocate in the model during self.finalize() per environment
+            # if setting is None, the number of worst-case number of contacts will be calculated in self.finalize()
+            num_rigid_contacts_per_env=None,
+        )
+
+        for k, v in default_modelbuilder_settings.items():
+            setattr(builder, k, v)
+
         return builder
 
     def create_builder(self):
@@ -253,6 +297,27 @@ class Environment:
         if self.integrator_type == IntegratorType.XPBD:
             model.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
             model.rigid_contact_rolling_friction = self.rigid_contact_rolling_friction
+
+        default_model_settings = dict(
+            # Default particle settings
+            particle_ke=1.0e3,
+            particle_kd=1.0e2,
+            particle_kf=1.0e2,
+            particle_mu=0.5,
+            particle_cohesion=0.0,
+            particle_adhesion=0.0,
+            particle_max_velocity=1e5,
+            # Default soft contact settings
+            soft_contact_margin=0.2,
+            soft_contact_ke=1.0e3,
+            soft_contact_kd=10.0,
+            soft_contact_kf=1.0e3,
+            soft_contact_mu=0.5,
+            soft_contact_restitution=0.0,
+        )
+
+        for k, v in default_model_settings.items():
+            setattr(model, k, v)
 
         return model
 
