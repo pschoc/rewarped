@@ -640,5 +640,10 @@ def run_env(Demo):
         plt.ylabel("Steps/Second")
         plt.show()
     else:
-        demo.init()
-        return demo.run()
+        try:
+            demo.init()
+            return demo.run()
+        except KeyboardInterrupt:
+            if demo.renderer is not None:
+                demo.renderer.save()
+            return -1
