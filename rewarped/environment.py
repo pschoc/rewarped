@@ -163,33 +163,6 @@ class Environment:
         self.plot_body_coords = False
         self.plot_joint_coords = False
 
-    def parse_args(self):
-        self.parser = argparse.ArgumentParser()
-        self.parser.add_argument(
-            "--integrator",
-            help="Type of integrator",
-            type=IntegratorType,
-            choices=list(IntegratorType),
-            default=self.integrator_type.value,
-        )
-        self.parser.add_argument(
-            "--renderer",
-            help="Type of renderer",
-            type=RenderMode,
-            choices=list(RenderMode),
-            default=self.render_mode.value,
-        )
-        self.parser.add_argument(
-            "--num_envs", help="Number of environments to simulate", type=int, default=self.num_envs
-        )
-        self.parser.add_argument("--profile", help="Enable profiling", type=bool, default=self.profile)
-
-        args = self.parser.parse_args()
-        self.integrator_type = args.integrator
-        self.render_mode = args.renderer
-        self.num_envs = args.num_envs
-        self.profile = args.profile
-
     def init(self):
         if self.use_tiled_rendering and self.render_mode == RenderMode.OPENGL:
             # no environment offset when using tiled rendering
@@ -404,6 +377,34 @@ class Environment:
                 # render state 1 (swapped with state 0 just before)
                 self.renderer.render(state or self.state_1)
                 self.renderer.end_frame()
+
+    def parse_args(self):
+        self.parser = argparse.ArgumentParser()
+        self.parser.add_argument(
+            "--integrator",
+            help="Type of integrator",
+            type=IntegratorType,
+            choices=list(IntegratorType),
+            default=self.integrator_type.value,
+        )
+        self.parser.add_argument(
+            "--renderer",
+            help="Type of renderer",
+            type=RenderMode,
+            choices=list(RenderMode),
+            # default=self.render_mode.value,
+            default=RenderMode.USD,
+        )
+        self.parser.add_argument(
+            "--num_envs", help="Number of environments to simulate", type=int, default=self.num_envs
+        )
+        self.parser.add_argument("--profile", help="Enable profiling", type=bool, default=self.profile)
+
+        args = self.parser.parse_args()
+        self.integrator_type = args.integrator
+        self.render_mode = args.renderer
+        self.num_envs = args.num_envs
+        self.profile = args.profile
 
     def run(self):
         # ---------------
