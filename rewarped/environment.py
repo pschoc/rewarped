@@ -145,7 +145,7 @@ class Environment:
     requires_grad: bool = False
     num_envs: int = 8
 
-    activate_ground_plane: bool = True
+    ground_plane: bool = True
     ground_plane_settings = {}
     up_axis: str = "Y"
     gravity: float = -9.81
@@ -261,8 +261,7 @@ class Environment:
     def create_model(self):
         self.builder.set_ground_plane(**self.ground_plane_settings)  # recreate builder._ground_params
         model = self.builder.finalize(device=self.device, requires_grad=self.requires_grad)
-
-        model.ground = self.activate_ground_plane
+        model.ground = self.ground_plane
 
         if self.integrator_type == IntegratorType.EULER:
             model.joint_attach_ke = self.joint_attach_ke
