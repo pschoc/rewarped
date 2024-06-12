@@ -29,6 +29,7 @@ class RenderMode(Enum):
 
 class IntegratorType(Enum):
     EULER = "euler"
+    FEATHERSTONE = "featherstone"
     XPBD = "xpbd"
 
     def __str__(self):
@@ -95,12 +96,14 @@ class Environment:
     frame_dt = 1.0 / 60.0
     episode_duration = 5.0  # seconds
 
-    integrator_type: IntegratorType = IntegratorType.XPBD
+    integrator_type: IntegratorType = IntegratorType.EULER
 
     sim_substeps_euler: int = 16
+    sim_substeps_featherstone: int = 16
     sim_substeps_xpbd: int = 5
 
     euler_settings = dict(angular_damping=0.05)
+    featherstone_settings = dict(angular_damping=0.05, update_mass_matrix_every=sim_substeps_featherstone)
     xpbd_settings = dict(
         iterations=2,
         soft_body_relaxation=0.9,
@@ -257,6 +260,9 @@ class Environment:
         if self.integrator_type == IntegratorType.EULER:
             sim_substeps = self.sim_substeps_euler
             integrator = wp.sim.SemiImplicitIntegrator(**self.euler_settings)
+        elif self.integrator_type == IntegratorType.FEATHERSTONE:
+            sim_substeps = self.sim_substeps_featherstone
+            integrator = wp.sim.FeatherstoneIntegrator(model, **self.featherstone_settings)
         elif self.integrator_type == IntegratorType.XPBD:
             sim_substeps = self.sim_substeps_xpbd
             integrator = wp.sim.XPBDIntegrator(**self.xpbd_settings)
