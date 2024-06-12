@@ -17,7 +17,7 @@ import numpy as np
 
 import warp as wp
 
-from .inertia import (
+from warp.sim.inertia import (
     compute_box_inertia,
     compute_capsule_inertia,
     compute_cone_inertia,
@@ -935,7 +935,7 @@ class Model:
             - potential_count (int): Potential number of contact points
             - actual_count (int): Actual number of contact points
         """
-        from .collide import count_contact_points
+        from warp.sim.collide import count_contact_points
 
         # calculate the potential number of shape pair contact points
         contact_count = wp.zeros(2, dtype=wp.int32, device=self.device)
@@ -1027,6 +1027,8 @@ class Model:
     @property
     def soft_contact_max(self):
         """Maximum number of soft contacts that can be registered"""
+        if self.soft_contact_particle is None:
+            return 0
         return len(self.soft_contact_particle)
 
 
@@ -1719,8 +1721,8 @@ class ModelBuilder:
         mode: int = JOINT_MODE_FORCE,
         limit_lower: float = -2 * math.pi,
         limit_upper: float = 2 * math.pi,
-        limit_ke: float = default_joint_limit_ke,
-        limit_kd: float = default_joint_limit_kd,
+        limit_ke: float = None,
+        limit_kd: float = None,
         linear_compliance: float = 0.0,
         angular_compliance: float = 0.0,
         armature: float = 1e-2,
@@ -1759,6 +1761,9 @@ class ModelBuilder:
 
         if child_xform is None:
             child_xform = wp.transform()
+
+        limit_ke = limit_ke if limit_ke is not None else self.default_joint_limit_ke
+        limit_kd = limit_kd if limit_kd is not None else self.default_joint_limit_kd
 
         action = 0.0
         if target is None and mode == JOINT_MODE_TARGET_POSITION:
@@ -1806,8 +1811,8 @@ class ModelBuilder:
         mode: int = JOINT_MODE_FORCE,
         limit_lower: float = -1e4,
         limit_upper: float = 1e4,
-        limit_ke: float = default_joint_limit_ke,
-        limit_kd: float = default_joint_limit_kd,
+        limit_ke: float = None,
+        limit_kd: float = None,
         linear_compliance: float = 0.0,
         angular_compliance: float = 0.0,
         armature: float = 1e-2,
@@ -1846,6 +1851,9 @@ class ModelBuilder:
 
         if child_xform is None:
             child_xform = wp.transform()
+
+        limit_ke = limit_ke if limit_ke is not None else self.default_joint_limit_ke
+        limit_kd = limit_kd if limit_kd is not None else self.default_joint_limit_kd
 
         action = 0.0
         if target is None and mode == JOINT_MODE_TARGET_POSITION:
@@ -3360,11 +3368,11 @@ class ModelBuilder:
         i: int,
         j: int,
         k: int,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
     ) -> float:
         """Adds a triangular FEM element between three particles in the system.
 
@@ -3384,6 +3392,11 @@ class ModelBuilder:
             between the particles in their initial configuration.
         """
         # TODO: Expose elastic parameters on a per-element basis
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
 
         # compute basis for 2D rest pose
         p = self.particle_q[i]
@@ -3561,8 +3574,8 @@ class ModelBuilder:
         k: int,
         l: int,
         rest: float = None,
-        edge_ke: float = default_edge_ke,
-        edge_kd: float = default_edge_kd,
+        edge_ke: float = None,
+        edge_kd: float = None,
     ):
         """Adds a bending edge element between four particles in the system.
 
@@ -3583,6 +3596,9 @@ class ModelBuilder:
             winding: (i, k, l), (j, l, k).
 
         """
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+
         # compute rest angle
         if rest is None:
             x1 = self.particle_q[i]
@@ -3690,16 +3706,16 @@ class ModelBuilder:
         fix_right: bool = False,
         fix_top: bool = False,
         fix_bottom: bool = False,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
-        edge_ke: float = default_edge_ke,
-        edge_kd: float = default_edge_kd,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
+        edge_ke: float = None,
+        edge_kd: float = None,
         add_springs: bool = False,
-        spring_ke: float = default_spring_ke,
-        spring_kd: float = default_spring_kd,
+        spring_ke: float = None,
+        spring_kd: float = None,
     ):
         """Helper to create a regular planar cloth grid
 
@@ -3722,6 +3738,15 @@ class ModelBuilder:
             fix_bottom: Make the bottom-most edge of particles kinematic
 
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+        spring_ke = spring_ke if spring_ke is not None else self.default_spring_ke
+        spring_kd = spring_kd if spring_kd is not None else self.default_spring_kd
 
         def grid_index(x, y, dim_x):
             return y * dim_x + x
@@ -3820,16 +3845,16 @@ class ModelBuilder:
         density: float,
         edge_callback=None,
         face_callback=None,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
-        edge_ke: float = default_edge_ke,
-        edge_kd: float = default_edge_kd,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
+        edge_ke: float = None,
+        edge_kd: float = None,
         add_springs: bool = False,
-        spring_ke: float = default_spring_ke,
-        spring_kd: float = default_spring_kd,
+        spring_ke: float = None,
+        spring_kd: float = None,
     ):
         """Helper to create a cloth model from a regular triangle mesh
 
@@ -3850,6 +3875,16 @@ class ModelBuilder:
 
             The mesh should be two manifold.
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+        edge_ke = edge_ke if edge_ke is not None else self.default_edge_ke
+        edge_kd = edge_kd if edge_kd is not None else self.default_edge_kd
+        spring_ke = spring_ke if spring_ke is not None else self.default_spring_ke
+        spring_kd = spring_kd if spring_kd is not None else self.default_spring_kd
+
         num_tris = int(len(indices) / 3)
 
         start_vertex = len(self.particle_q)
@@ -3927,9 +3962,11 @@ class ModelBuilder:
         cell_z: float,
         mass: float,
         jitter: float,
-        radius_mean: float = default_particle_radius,
+        radius_mean: float = None,
         radius_std: float = 0.0,
     ):
+        radius_mean = radius_mean if radius_mean is not None else self.default_particle_radius
+
         rng = np.random.default_rng()
         for z in range(dim_z):
             for y in range(dim_y):
@@ -3964,11 +4001,11 @@ class ModelBuilder:
         fix_right: bool = False,
         fix_top: bool = False,
         fix_bottom: bool = False,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
     ):
         """Helper to create a rectangular tetrahedral FEM grid
 
@@ -3995,6 +4032,11 @@ class ModelBuilder:
             fix_top: Make the top-most edge of particles kinematic
             fix_bottom: Make the bottom-most edge of particles kinematic
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
 
         start_vertex = len(self.particle_q)
 
@@ -4086,11 +4128,11 @@ class ModelBuilder:
         k_mu: float,
         k_lambda: float,
         k_damp: float,
-        tri_ke: float = default_tri_ke,
-        tri_ka: float = default_tri_ka,
-        tri_kd: float = default_tri_kd,
-        tri_drag: float = default_tri_drag,
-        tri_lift: float = default_tri_lift,
+        tri_ke: float = None,
+        tri_ka: float = None,
+        tri_kd: float = None,
+        tri_drag: float = None,
+        tri_lift: float = None,
     ):
         """Helper to create a tetrahedral model from an input tetrahedral mesh
 
@@ -4105,6 +4147,12 @@ class ModelBuilder:
             k_lambda: The second elastic Lame parameter
             k_damp: The damping stiffness
         """
+        tri_ke = tri_ke if tri_ke is not None else self.default_tri_ke
+        tri_ka = tri_ka if tri_ka is not None else self.default_tri_ka
+        tri_kd = tri_kd if tri_kd is not None else self.default_tri_kd
+        tri_drag = tri_drag if tri_drag is not None else self.default_tri_drag
+        tri_lift = tri_lift if tri_lift is not None else self.default_tri_lift
+
         num_tets = int(len(indices) / 4)
 
         start_vertex = len(self.particle_q)
@@ -4196,16 +4244,22 @@ class ModelBuilder:
         self,
         normal=None,
         offset=0.0,
-        ke: float = default_shape_ke,
-        kd: float = default_shape_kd,
-        kf: float = default_shape_kf,
-        mu: float = default_shape_mu,
-        restitution: float = default_shape_restitution,
+        ke: float = None,
+        kd: float = None,
+        kf: float = None,
+        mu: float = None,
+        restitution: float = None,
     ):
         """
         Creates a ground plane for the world. If the normal is not specified,
         the up_vector of the ModelBuilder is used.
         """
+        ke = ke if ke is not None else self.default_shape_ke
+        kd = kd if kd is not None else self.default_shape_kd
+        kf = kf if kf is not None else self.default_shape_kf
+        mu = mu if mu is not None else self.default_shape_mu
+        restitution = restitution if restitution is not None else self.default_shape_restitution
+
         if normal is None:
             normal = self.up_vector
         self._ground_params = {
