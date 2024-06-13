@@ -337,7 +337,7 @@ class Environment:
                     ]
                 )
         elif self.render_mode == RenderMode.USD:
-            filename = os.path.join(self.render_dir, self.sim_name + ".usd")
+            filename = os.path.join(self.render_dir, self.sim_name + f"_{self.num_envs}.usd")
             renderer = wp.sim.render.SimRendererUsd(
                 self.model,
                 filename,
