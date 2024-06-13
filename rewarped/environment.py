@@ -13,12 +13,10 @@ from enum import Enum
 from typing import Tuple
 
 import numpy as np
-
+import torch
 import warp as wp
 import warp.sim
 import warp.sim.render
-
-wp.init()
 
 
 class RenderMode(Enum):
@@ -32,6 +30,7 @@ class RenderMode(Enum):
 
 class IntegratorType(Enum):
     EULER = "euler"
+    FEATHERSTONE = "featherstone"
     XPBD = "xpbd"
 
     def __str__(self):
@@ -79,149 +78,242 @@ def compute_env_offsets(num_envs, env_offset=(5.0, 0.0, 5.0), up_axis="Y"):
     return env_offsets
 
 
+def compute_up_vector(up_axis):
+    if isinstance(up_axis, str):
+        up_axis = "XYZ".index(up_axis.upper())
+    if up_axis == 0:
+        return (1.0, 0.0, 0.0)
+    elif up_axis == 1:
+        return (0.0, 1.0, 0.0)
+    elif up_axis == 2:
+        return (0.0, 0.0, 1.0)
+    else:
+        raise ValueError(up_axis)
+
+
 class Environment:
     sim_name: str = "Environment"
 
     frame_dt = 1.0 / 60.0
-
     episode_duration = 5.0  # seconds
 
-    # whether to play the simulation indefinitely when using the OpenGL renderer
-    continuous_opengl_render: bool = True
+    integrator_type: IntegratorType = IntegratorType.EULER
 
     sim_substeps_euler: int = 16
+    sim_substeps_featherstone: int = 16
     sim_substeps_xpbd: int = 5
 
-    euler_settings = dict()
-    xpbd_settings = dict()
-
-    render_mode: RenderMode = RenderMode.OPENGL
-    opengl_render_settings = dict()
-    usd_render_settings = dict(scaling=10.0)
-    show_rigid_contact_points = False
-    contact_points_radius = 1e-3
-    show_joints = False
-    # whether OpenGLRenderer should render each environment in a separate tile
-    use_tiled_rendering = False
-
-    # whether to apply model.joint_q, joint_qd to bodies before simulating
-    eval_fk: bool = True
-
-    profile: bool = False
-
-    use_graph_capture: bool = wp.get_preferred_device().is_cuda
-
-    num_envs: int = 100
-
-    activate_ground_plane: bool = True
-
-    integrator_type: IntegratorType = IntegratorType.XPBD
-
-    up_axis: str = "Y"
-    gravity: float = -9.81
-    env_offset: Tuple[float, float, float] = (1.0, 0.0, 1.0)
+    euler_settings = dict(angular_damping=0.05)
+    featherstone_settings = dict(angular_damping=0.05, update_mass_matrix_every=sim_substeps_featherstone)
+    xpbd_settings = dict(
+        iterations=2,
+        soft_body_relaxation=0.9,
+        soft_contact_relaxation=0.9,
+        joint_linear_relaxation=0.7,
+        joint_angular_relaxation=0.4,
+        rigid_contact_relaxation=0.8,
+        rigid_contact_con_weighting=True,
+        angular_damping=0.0,
+        enable_restitution=False,
+    )
 
     # stiffness and damping for joint attachment dynamics used by Euler
     joint_attach_ke: float = 32000.0
     joint_attach_kd: float = 50.0
 
-    # distance threshold at which contacts are generated
-    rigid_contact_margin: float = 0.05
+    # friction coefficients for rigid body contacts used by XPBD
+    rigid_contact_torsional_friction: float = 0.5
+    rigid_contact_rolling_friction: float = 0.001
+
+    # whether to apply model.joint_q, joint_qd to bodies before simulating
+    eval_fk: bool = True
+    # whether to update state.joint_q, state.joint_qd
+    eval_ik: bool = False
+
+    render_mode: RenderMode = RenderMode.NONE
+    opengl_render_settings = dict(scaling=1.0)
+    usd_render_settings = dict(scaling=100.0)
+
+    show_rigid_contact_points = False
+    contact_points_radius = 1e-3
+    show_joints = False
+    # whether OpenGLRenderer should render each environment in a separate tile
+    use_tiled_rendering = False
+    # whether to play the simulation indefinitely when using the OpenGL renderer
+    continuous_opengl_render: bool = True
+
+    use_graph_capture: bool = wp.get_preferred_device().is_cuda
+    synchronize: bool = True
+    requires_grad: bool = False
+    num_envs: int = 8
+
+    ground_plane: bool = True
+    ground_plane_settings = {}
+    up_axis: str = "Y"
+    gravity: float = -9.81
+    env_offset: Tuple[float, float, float] = (1.0, 0.0, 1.0)
 
     # whether each environment should have its own collision group
     # to avoid collisions between environments
     separate_collision_group_per_env: bool = True
 
-    plot_body_coords: bool = False
-    plot_joint_coords: bool = False
-
-    requires_grad: bool = False
-
-    # control-related definitions, to be updated by derived classes
-    control_dim: int = 0
+    asset_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
+    render_dir = os.path.join(os.path.dirname(__file__), "..", "outputs")
 
     def __init__(self):
-        self.parser = argparse.ArgumentParser()
-        self.parser.add_argument(
-            "--integrator",
-            help="Type of integrator",
-            type=IntegratorType,
-            choices=list(IntegratorType),
-            default=self.integrator_type.value,
-        )
-        self.parser.add_argument(
-            "--visualizer",
-            help="Type of renderer",
-            type=RenderMode,
-            choices=list(RenderMode),
-            default=self.render_mode.value,
-        )
-        self.parser.add_argument(
-            "--num_envs", help="Number of environments to simulate", type=int, default=self.num_envs
-        )
-        self.parser.add_argument("--profile", help="Enable profiling", type=bool, default=self.profile)
-
-    def parse_args(self):
-        args = self.parser.parse_args()
-        self.integrator_type = args.integrator
-        self.render_mode = args.visualizer
-        self.num_envs = args.num_envs
-        self.profile = args.profile
+        self.profile = False
+        self.plot_body_coords = False
+        self.plot_joint_coords = False
 
     def init(self):
-        if self.integrator_type == IntegratorType.EULER:
-            self.sim_substeps = self.sim_substeps_euler
-        elif self.integrator_type == IntegratorType.XPBD:
-            self.sim_substeps = self.sim_substeps_xpbd
+        if self.use_tiled_rendering and self.render_mode == RenderMode.OPENGL:
+            # no environment offset when using tiled rendering
+            self.env_offset = (0.0, 0.0, 0.0)
+
+        self.builder = self.create_builder()
+        assert self.builder.num_envs == self.num_envs
+        self.model = self.create_model()
+
+        # self.device = self.model.device
+        if not self.model.device.is_cuda:
+            self.use_graph_capture = False
+
+        self.sim_substeps, self.integrator = self.create_integrator(self.model)
 
         self.episode_frames = int(self.episode_duration / self.frame_dt)
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_steps = int(self.episode_duration / self.sim_dt)
 
-        if self.use_tiled_rendering and self.render_mode == RenderMode.OPENGL:
-            # no environment offset when using tiled rendering
-            self.env_offset = (0.0, 0.0, 0.0)
-
-        builder = wp.sim.ModelBuilder()
-        builder.rigid_contact_margin = self.rigid_contact_margin
-        try:
-            articulation_builder = wp.sim.ModelBuilder()
-            self.create_articulation(articulation_builder)
-            env_offsets = compute_env_offsets(self.num_envs, self.env_offset, self.up_axis)
-            for i in range(self.num_envs):
-                xform = wp.transform(env_offsets[i], wp.quat_identity())
-                builder.add_builder(
-                    articulation_builder, xform, separate_collision_group=self.separate_collision_group_per_env
-                )
-            self.bodies_per_env = len(articulation_builder.body_q)
-        except NotImplementedError:
-            # custom simulation setup where something other than an articulation is used
-            self.setup(builder)
-            self.bodies_per_env = len(builder.body_q)
-
-        self.model = builder.finalize()
-        self.device = self.model.device
-        if not self.device.is_cuda:
-            self.use_graph_capture = False
-        self.model.ground = self.activate_ground_plane
-
-        self.model.joint_attach_ke = self.joint_attach_ke
-        self.model.joint_attach_kd = self.joint_attach_kd
-
         # set up current and next state to be used by the integrator
         self.state_0 = None
         self.state_1 = None
+        self.control_0 = None
+
+        self.renderer = self.create_renderer()
+
+    def create_modelbuilder(self):
+        builder = wp.sim.ModelBuilder(up_vector=compute_up_vector(self.up_axis), gravity=self.gravity)
+
+        default_modelbuilder_settings = dict(
+            # Default particle settings
+            default_particle_radius=0.1,
+            # particle_max_velocity=1e5,  # set in create_model instead
+            # Default triangle soft mesh settings
+            default_tri_ke=100.0,
+            default_tri_ka=100.0,
+            default_tri_kd=10.0,
+            default_tri_drag=0.0,
+            default_tri_lift=0.0,
+            # Default distance constraint properties
+            default_spring_ke=100.0,
+            default_spring_kd=0.0,
+            # Default edge bending properties
+            default_edge_ke=100.0,
+            default_edge_kd=0.0,
+            # Default rigid shape contact material properties
+            default_shape_ke=1.0e5,
+            default_shape_kd=1000.0,
+            default_shape_kf=1000.0,
+            default_shape_ka=0.0,
+            default_shape_mu=0.5,
+            default_shape_restitution=0.0,
+            default_shape_density=1000.0,
+            default_shape_thickness=1e-5,
+            # Default joint settings
+            default_joint_limit_ke=100.0,
+            default_joint_limit_kd=1.0,
+            # Maximum number of soft contacts that can be registered
+            soft_contact_max=64 * 1024,
+            # maximum number of contact points to generate per mesh shape
+            rigid_mesh_contact_max=0,  # 0 = unlimited
+            # contacts to be generated within the given distance margin to be generated at
+            # every simulation substep (can be 0 if only one PBD solver iteration is used)
+            rigid_contact_margin=0.1,
+            # number of rigid contact points to allocate in the model during self.finalize() per environment
+            # if setting is None, the number of worst-case number of contacts will be calculated in self.finalize()
+            num_rigid_contacts_per_env=None,
+        )
+
+        for k, v in default_modelbuilder_settings.items():
+            setattr(builder, k, v)
+
+        return builder
+
+    def create_builder(self):
+        builder = self.create_modelbuilder()
+        env_builder = self.create_modelbuilder()
+        self.create_env(env_builder)
+        self.env_offsets = compute_env_offsets(self.num_envs, self.env_offset, self.up_axis)
+        for i in range(self.num_envs):
+            xform = wp.transform(self.env_offsets[i], wp.quat_identity())
+            builder.add_builder(
+                env_builder,
+                xform,
+                update_num_env_count=True,
+                separate_collision_group=self.separate_collision_group_per_env,
+            )
+        return builder
+
+    def create_env(self, builder):
+        self.create_articulation(builder)
+
+    def create_articulation(self, builder):
+        raise NotImplementedError
+
+    def create_model(self):
+        self.builder.set_ground_plane(**self.ground_plane_settings)  # recreate builder._ground_params
+        model = self.builder.finalize(device=self.device, requires_grad=self.requires_grad)
+        model.ground = self.ground_plane
 
         if self.integrator_type == IntegratorType.EULER:
-            self.integrator = wp.sim.SemiImplicitIntegrator(**self.euler_settings)
-        elif self.integrator_type == IntegratorType.XPBD:
-            self.integrator = wp.sim.XPBDIntegrator(**self.xpbd_settings)
+            model.joint_attach_ke = self.joint_attach_ke
+            model.joint_attach_kd = self.joint_attach_kd
+        if self.integrator_type == IntegratorType.XPBD:
+            model.rigid_contact_torsional_friction = self.rigid_contact_torsional_friction
+            model.rigid_contact_rolling_friction = self.rigid_contact_rolling_friction
 
-        self.renderer = None
-        if self.profile:
-            self.render_mode = RenderMode.NONE
-        if self.render_mode == RenderMode.OPENGL:
-            self.renderer = wp.sim.render.SimRendererOpenGL(
+        default_model_settings = dict(
+            # Default particle settings
+            particle_ke=1.0e3,
+            particle_kd=1.0e2,
+            particle_kf=1.0e2,
+            particle_mu=0.5,
+            particle_cohesion=0.0,
+            particle_adhesion=0.0,
+            particle_max_velocity=1e5,
+            # Default soft contact settings
+            soft_contact_margin=0.2,
+            soft_contact_ke=1.0e3,
+            soft_contact_kd=10.0,
+            soft_contact_kf=1.0e3,
+            soft_contact_mu=0.5,
+            soft_contact_restitution=0.0,
+        )
+
+        for k, v in default_model_settings.items():
+            setattr(model, k, v)
+
+        return model
+
+    def create_integrator(self, model):
+        if self.integrator_type == IntegratorType.EULER:
+            sim_substeps = self.sim_substeps_euler
+            integrator = wp.sim.SemiImplicitIntegrator(**self.euler_settings)
+        elif self.integrator_type == IntegratorType.FEATHERSTONE:
+            sim_substeps = self.sim_substeps_featherstone
+            integrator = wp.sim.FeatherstoneIntegrator(model, **self.featherstone_settings)
+        elif self.integrator_type == IntegratorType.XPBD:
+            sim_substeps = self.sim_substeps_xpbd
+            integrator = wp.sim.XPBDIntegrator(**self.xpbd_settings)
+        else:
+            raise NotImplementedError(self.integrator_type)
+        return sim_substeps, integrator
+
+    def create_renderer(self):
+        if self.render_mode == RenderMode.NONE:
+            renderer = None
+        elif self.render_mode == RenderMode.OPENGL:
+            renderer = wp.sim.render.SimRendererOpenGL(
                 self.model,
                 self.sim_name,
                 up_axis=self.up_axis,
@@ -238,52 +330,45 @@ class Environment:
                 additional_instances = []
                 if self.activate_ground_plane:
                     additional_instances.append(floor_id)
-                self.renderer.setup_tiled_rendering(
+                renderer.setup_tiled_rendering(
                     instances=[
                         instance_ids[i * shapes_per_env : (i + 1) * shapes_per_env] + additional_instances
                         for i in range(self.num_envs)
                     ]
                 )
         elif self.render_mode == RenderMode.USD:
-            filename = os.path.join(os.path.dirname(__file__), "..", "outputs", self.sim_name + ".usd")
-            self.renderer = wp.sim.render.SimRendererUsd(
+            filename = os.path.join(self.render_dir, self.sim_name + f"_{self.num_envs}.usd")
+            renderer = wp.sim.render.SimRendererUsd(
                 self.model,
                 filename,
                 up_axis=self.up_axis,
                 show_rigid_contact_points=self.show_rigid_contact_points,
                 **self.usd_render_settings,
             )
+        else:
+            raise NotImplementedError(self.render_mode)
 
-    def create_articulation(self, builder):
-        raise NotImplementedError
-
-    def setup(self, builder):
-        pass
-
-    def customize_model(self, model):
-        pass
-
-    def before_simulate(self):
-        pass
-
-    def after_simulate(self):
-        pass
-
-    def custom_update(self):
-        pass
+        return renderer
 
     @property
     def state(self):
         # shortcut to current state
         return self.state_0
 
+    @property
+    def control(self):
+        return self.control_0
+
     def update(self):
+        control = self.control_0
         for i in range(self.sim_substeps):
             self.state_0.clear_forces()
-            self.custom_update()
             wp.sim.collide(self.model, self.state_0)
-            self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt)
+            self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt, control=control)
             self.state_0, self.state_1 = self.state_1, self.state_0
+
+        if self.eval_ik:
+            wp.sim.eval_ik(self.model, self.state_0, self.state_0.joint_q, self.state_0.joint_qd)
 
     def render(self, state=None):
         if self.renderer is not None:
@@ -294,9 +379,108 @@ class Environment:
                 self.renderer.render(state or self.state_1)
                 self.renderer.end_frame()
 
+    def print_model_info(self):
+        print("--- Model Info ---")
+        print("frame_dt", self.frame_dt)
+        print("sim_dt", self.sim_dt)
+        print("sim_substeps", self.sim_substeps)
+
+        if self.model.joint_count > 0:
+            print("--- joint ---")
+            print("joint_parent", len(self.model.joint_parent), self.model.joint_parent.numpy())
+            print("joint_child", len(self.model.joint_child), self.model.joint_child.numpy())
+            print("joint_name", len(self.model.joint_name), self.model.joint_name)
+            if len(self.model.joint_q) > 0:
+                print("joint_q", len(self.model.joint_q), self.model.joint_q.numpy())
+                print("joint_qd", len(self.model.joint_qd), self.model.joint_qd.numpy())
+                print("joint_armature", len(self.model.joint_armature), self.model.joint_armature.numpy())
+            if len(self.model.joint_axis) > 0:
+                # print("joint_axis", self.model.joint_axis.numpy())
+                print("joint_axis_mode", len(self.model.joint_axis_mode), self.model.joint_axis_mode.numpy())
+                print("joint_act", len(self.model.joint_act), self.model.joint_act.numpy())
+                print("joint_target_ke", len(self.model.joint_target_ke), self.model.joint_target_ke.numpy())
+                print("joint_target_kd", len(self.model.joint_target_kd), self.model.joint_target_kd.numpy())
+                print("joint_limit_ke", len(self.model.joint_limit_ke), self.model.joint_limit_ke.numpy())
+                print("joint_limit_kd", len(self.model.joint_limit_kd), self.model.joint_limit_kd.numpy())
+                print("joint_limit_lower", len(self.model.joint_limit_lower), self.model.joint_limit_lower.numpy())
+                print("joint_limit_upper", len(self.model.joint_limit_upper), self.model.joint_limit_upper.numpy())
+            # print("joint_X_p", self.model.joint_X_p.numpy())
+            # print("joint_X_c", self.model.joint_X_c.numpy())
+
+        if self.model.body_count > 0:
+            print("--- body ---")
+            print("body_name", len(self.model.body_name), self.model.body_name)
+            print("body_q", self.state_0.body_q.numpy())
+            print("body_com", self.model.body_com.numpy())
+            print("body_mass", self.model.body_mass.numpy())
+            print("body_inertia", self.model.body_inertia.numpy())
+
+            print("rigid_contact_max", self.model.rigid_contact_max)
+            print("rigid_contact_max_limited", self.model.rigid_contact_max_limited)
+            print("rigid_mesh_contact_max", self.model.rigid_mesh_contact_max)
+            print("rigid_contact_thickness", self.model.rigid_contact_thickness)
+
+        if self.model.shape_count > 0:
+            print("--- shape ---")
+            print("shape_geo_type", self.model.shape_geo.type.numpy())
+            # print("shape_geo_scale", self.model.shape_geo.scale.numpy())
+            print("shape_geo_is_solid", self.model.shape_geo.is_solid.numpy())
+            print("shape_geo_thickness", self.model.shape_geo.thickness.numpy())
+
+            print("shape_material_ke", self.model.shape_materials.ke.numpy())
+            print("shape_material_kd", self.model.shape_materials.kd.numpy())
+            print("shape_material_kf", self.model.shape_materials.kf.numpy())
+            print("shape_material_ka", self.model.shape_materials.ka.numpy())
+            print("shape_material_mu", self.model.shape_materials.mu.numpy())
+            print("shape_material_restitution", self.model.shape_materials.restitution.numpy())
+
+            print("shape_collision_radius", self.model.shape_collision_radius.numpy())
+            # print("shape_transform", self.model.shape_transform.numpy())
+
+        if self.model.particle_count > 0:
+            print("--- particle ---")
+            print("particle_count", self.model.particle_count)
+            print("particle_max_radius", self.model.particle_max_radius)
+            print("particle_max_velocity", self.model.particle_max_velocity)
+            # print("particle_q", self.model.particle_q.numpy())
+            # print("particle_qd", self.model.particle_qd.numpy())
+            # print("particle_mass", self.model.particle_mass.numpy())
+            # print("particle_radius", self.model.particle_radius.numpy())
+        print()
+
+    def parse_args(self):
+        self.parser = argparse.ArgumentParser()
+        self.parser.add_argument(
+            "--integrator",
+            help="Type of integrator",
+            type=IntegratorType,
+            choices=list(IntegratorType),
+            default=self.integrator_type.value,
+        )
+        self.parser.add_argument(
+            "--renderer",
+            help="Type of renderer",
+            type=RenderMode,
+            choices=list(RenderMode),
+            # default=self.render_mode.value,
+            default=RenderMode.USD,
+        )
+        self.parser.add_argument(
+            "--num_envs", help="Number of environments to simulate", type=int, default=self.num_envs
+        )
+        self.parser.add_argument("--profile", help="Enable profiling", type=bool, default=self.profile)
+
+        args = self.parser.parse_args()
+        self.integrator_type = args.integrator
+        self.render_mode = args.renderer
+        self.num_envs = args.num_envs
+        self.profile = args.profile
+
     def run(self):
         # ---------------
         # run simulation
+
+        self.init()
 
         self.sim_time = 0.0
         self.render_time = 0.0
@@ -305,8 +489,6 @@ class Environment:
 
         if self.eval_fk:
             wp.sim.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, None, self.state_0)
-
-        self.before_simulate()
 
         if self.renderer is not None:
             self.render(self.state_0)
@@ -369,9 +551,9 @@ class Environment:
                 if not self.continuous_opengl_render or self.render_mode != RenderMode.OPENGL:
                     break
 
-            wp.synchronize()
-
-        self.after_simulate()
+            if self.synchronize:
+                # wp.synchronize()
+                wp.synchronize_device()
 
         avg_time = np.array(profiler["simulate"]).mean() / self.episode_frames
         avg_steps_second = 1000.0 * float(self.num_envs) / avg_time
@@ -381,6 +563,17 @@ class Environment:
         if self.renderer is not None:
             self.renderer.save()
 
+        self.run_plots(
+            q_history,
+            qd_history,
+            delta_history,
+            num_con_history,
+            joint_q_history,
+        )
+
+        return 1000.0 * float(self.num_envs) / avg_time
+
+    def run_plots(self, q_history, qd_history, delta_history, num_con_history, joint_q_history):
         if self.plot_body_coords:
             import matplotlib.pyplot as plt
 
@@ -488,11 +681,9 @@ class Environment:
             plt.tight_layout()
             plt.show()
 
-        return 1000.0 * float(self.num_envs) / avg_time
 
-
-def run_env(Demo):
-    demo = Demo()
+def run_env(Demo, **kwargs):
+    demo = Demo(device="cuda" if torch.cuda.is_available() else "cpu", **kwargs)
     demo.parse_args()
     if demo.profile:
         import matplotlib.pyplot as plt
@@ -503,7 +694,7 @@ def run_env(Demo):
 
         for i in range(15):
             demo.num_envs = env_count
-            demo.init()
+            demo.initialized = False  # force re-initialization for WarpEnv
             steps_per_second = demo.run()
 
             env_size.append(env_count)
@@ -524,5 +715,10 @@ def run_env(Demo):
         plt.ylabel("Steps/Second")
         plt.show()
     else:
-        demo.init()
-        return demo.run()
+        try:
+            steps_per_second = demo.run()
+            print(f"envs: {demo.num_envs} steps/second: {steps_per_second}")
+        except KeyboardInterrupt:
+            if demo.renderer is not None:
+                demo.renderer.save()
+            return -1
