@@ -58,13 +58,19 @@ select = [
     "C4",  # flake8-comprehensions
 ]
 ignore = [
-    "E501", # Many lines are over 120 characters already
-    "E741", # Warp often uses l as a variable name
-    "F403", # Allow wildcard imports
-    "F405", # Related to use of wildcard imports
-    "F811", # Warp often uses overloads
-    "B007", # Loop control variable not used within loop body
-    "C408", # Unnecessary `dict` call (rewrite as a literal)
+    "E501",  # Many lines are over 120 characters already
+    "E741",  # Warp often uses l as a variable name
+    "F403",  # Allow wildcard imports
+    "F405",  # Related to use of wildcard imports
+    "F811",  # Warp often uses overloads
+    "B007",  # Loop control variable not used within loop body
+    "C408",  # Unnecessary `dict` call (rewrite as a literal)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = [
+    "F401",  # Module imported but unused
+    "E402",  # Module level import not at top of file
 ]
 
 [tool.ruff.lint.pydocstyle]
