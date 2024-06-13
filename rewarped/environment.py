@@ -379,6 +379,75 @@ class Environment:
                 self.renderer.render(state or self.state_1)
                 self.renderer.end_frame()
 
+    def print_model_info(self):
+        print("--- Model Info ---")
+        print("frame_dt", self.frame_dt)
+        print("sim_dt", self.sim_dt)
+        print("sim_substeps", self.sim_substeps)
+
+        if self.model.joint_count > 0:
+            print("--- joint ---")
+            print("joint_parent", len(self.model.joint_parent), self.model.joint_parent.numpy())
+            print("joint_child", len(self.model.joint_child), self.model.joint_child.numpy())
+            print("joint_name", len(self.model.joint_name), self.model.joint_name)
+            if len(self.model.joint_q) > 0:
+                print("joint_q", len(self.model.joint_q), self.model.joint_q.numpy())
+                print("joint_qd", len(self.model.joint_qd), self.model.joint_qd.numpy())
+                print("joint_armature", len(self.model.joint_armature), self.model.joint_armature.numpy())
+            if len(self.model.joint_axis) > 0:
+                # print("joint_axis", self.model.joint_axis.numpy())
+                print("joint_axis_mode", len(self.model.joint_axis_mode), self.model.joint_axis_mode.numpy())
+                print("joint_act", len(self.model.joint_act), self.model.joint_act.numpy())
+                print("joint_target_ke", len(self.model.joint_target_ke), self.model.joint_target_ke.numpy())
+                print("joint_target_kd", len(self.model.joint_target_kd), self.model.joint_target_kd.numpy())
+                print("joint_limit_ke", len(self.model.joint_limit_ke), self.model.joint_limit_ke.numpy())
+                print("joint_limit_kd", len(self.model.joint_limit_kd), self.model.joint_limit_kd.numpy())
+                print("joint_limit_lower", len(self.model.joint_limit_lower), self.model.joint_limit_lower.numpy())
+                print("joint_limit_upper", len(self.model.joint_limit_upper), self.model.joint_limit_upper.numpy())
+            # print("joint_X_p", self.model.joint_X_p.numpy())
+            # print("joint_X_c", self.model.joint_X_c.numpy())
+
+        if self.model.body_count > 0:
+            print("--- body ---")
+            print("body_name", len(self.model.body_name), self.model.body_name)
+            print("body_q", self.state_0.body_q.numpy())
+            print("body_com", self.model.body_com.numpy())
+            print("body_mass", self.model.body_mass.numpy())
+            print("body_inertia", self.model.body_inertia.numpy())
+
+            print("rigid_contact_max", self.model.rigid_contact_max)
+            print("rigid_contact_max_limited", self.model.rigid_contact_max_limited)
+            print("rigid_mesh_contact_max", self.model.rigid_mesh_contact_max)
+            print("rigid_contact_thickness", self.model.rigid_contact_thickness)
+
+        if self.model.shape_count > 0:
+            print("--- shape ---")
+            print("shape_geo_type", self.model.shape_geo.type.numpy())
+            # print("shape_geo_scale", self.model.shape_geo.scale.numpy())
+            print("shape_geo_is_solid", self.model.shape_geo.is_solid.numpy())
+            print("shape_geo_thickness", self.model.shape_geo.thickness.numpy())
+
+            print("shape_material_ke", self.model.shape_materials.ke.numpy())
+            print("shape_material_kd", self.model.shape_materials.kd.numpy())
+            print("shape_material_kf", self.model.shape_materials.kf.numpy())
+            print("shape_material_ka", self.model.shape_materials.ka.numpy())
+            print("shape_material_mu", self.model.shape_materials.mu.numpy())
+            print("shape_material_restitution", self.model.shape_materials.restitution.numpy())
+
+            print("shape_collision_radius", self.model.shape_collision_radius.numpy())
+            # print("shape_transform", self.model.shape_transform.numpy())
+
+        if self.model.particle_count > 0:
+            print("--- particle ---")
+            print("particle_count", self.model.particle_count)
+            print("particle_max_radius", self.model.particle_max_radius)
+            print("particle_max_velocity", self.model.particle_max_velocity)
+            # print("particle_q", self.model.particle_q.numpy())
+            # print("particle_qd", self.model.particle_qd.numpy())
+            # print("particle_mass", self.model.particle_mass.numpy())
+            # print("particle_radius", self.model.particle_radius.numpy())
+        print()
+
     def parse_args(self):
         self.parser = argparse.ArgumentParser()
         self.parser.add_argument(
