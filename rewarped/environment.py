@@ -171,6 +171,7 @@ class Environment:
             self.env_offset = (0.0, 0.0, 0.0)
 
         self.builder = self.create_builder()
+        assert self.builder.num_envs == self.num_envs
         self.model = self.create_model()
 
         # self.device = self.model.device
@@ -251,7 +252,6 @@ class Environment:
                 update_num_env_count=True,
                 separate_collision_group=self.separate_collision_group_per_env,
             )
-        assert self.builder.num_envs == self.num_envs
         return builder
 
     def create_env(self, builder):
