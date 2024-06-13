@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Tuple
 
 import numpy as np
+import torch
 import warp as wp
 import warp.sim
 import warp.sim.render
@@ -410,6 +411,8 @@ class Environment:
         # ---------------
         # run simulation
 
+        self.init()
+
         self.sim_time = 0.0
         self.render_time = 0.0
         self.state_0 = self.model.state()
@@ -610,8 +613,8 @@ class Environment:
             plt.show()
 
 
-def run_env(Demo):
-    demo = Demo()
+def run_env(Demo, **kwargs):
+    demo = Demo(device="cuda" if torch.cuda.is_available() else "cpu", **kwargs)
     demo.parse_args()
     if demo.profile:
         import matplotlib.pyplot as plt
@@ -622,7 +625,7 @@ def run_env(Demo):
 
         for i in range(15):
             demo.num_envs = env_count
-            demo.init()
+            demo.initialized = False  # force re-initialization for WarpEnv
             steps_per_second = demo.run()
 
             env_size.append(env_count)
@@ -644,8 +647,8 @@ def run_env(Demo):
         plt.show()
     else:
         try:
-            demo.init()
-            return demo.run()
+            steps_per_second = demo.run()
+            print(f"envs: {demo.num_envs} steps/second: {steps_per_second}")
         except KeyboardInterrupt:
             if demo.renderer is not None:
                 demo.renderer.save()
