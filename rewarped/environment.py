@@ -142,6 +142,7 @@ class Environment:
     continuous_opengl_render: bool = True
 
     use_graph_capture: bool = wp.get_preferred_device().is_cuda
+    synchronize: bool = True
     requires_grad: bool = False
     num_envs: int = 8
 
@@ -478,7 +479,9 @@ class Environment:
                 if not self.continuous_opengl_render or self.render_mode != RenderMode.OPENGL:
                     break
 
-            wp.synchronize()
+            if self.synchronize:
+                # wp.synchronize()
+                wp.synchronize_device()
 
         avg_time = np.array(profiler["simulate"]).mean() / self.episode_frames
         avg_steps_second = 1000.0 * float(self.num_envs) / avg_time
