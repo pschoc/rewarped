@@ -447,7 +447,8 @@ class WarpEnv(Environment):
 
         self.integrator._step = 0
 
-        self.randomize_init(env_ids)
+        if self.randomize:
+            self.randomize_init(env_ids)
 
         if self.eval_fk:
             mask = None
