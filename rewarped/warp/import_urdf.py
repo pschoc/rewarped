@@ -39,6 +39,7 @@ def parse_urdf(
     joint_limit_lower=-1e6,
     joint_limit_upper=1e6,
     scale=1.0,
+    hide_visuals=False,
     parse_visuals_as_colliders=False,
     force_show_colliders=False,
     enable_self_collisions=True,
@@ -72,6 +73,7 @@ def parse_urdf(
         joint_limit_lower (float): The default lower joint limit if not specified in the URDF.
         joint_limit_upper (float): The default upper joint limit if not specified in the URDF.
         scale (float): The scaling factor to apply to the imported mechanism.
+        hide_visuals (bool): If True, hide visual shapes.
         parse_visuals_as_colliders (bool): If True, the geometry defined under the `<visual>` tags is used for collision handling instead of the `<collision>` geometries.
         force_show_colliders (bool): If True, the collision shapes are always shown, even if there are visual shapes.
         enable_self_collisions (bool): If True, self-collisions are enabled.
@@ -165,6 +167,21 @@ def parse_urdf(
                     **contact_vars,
                 )
                 shapes.append(s)
+
+            for capsule in geo.findall("capsule"):
+                s = builder.add_shape_capsule(
+                    body=link,
+                    pos=wp.vec3(tf.p),
+                    rot=wp.quat(tf.q),
+                    radius=float(capsule.get("radius") or "1") * scale,
+                    half_height=float(capsule.get("height") or "1") * 0.5 * scale,
+                    density=density,
+                    up_axis=2,  # capsules in URDF are aligned with z-axis
+                    is_visible=visible,
+                    has_ground_collision=not just_visual,
+                    has_shape_collision=not just_visual,
+                    **contact_vars,
+                )
 
             for mesh in geo.findall("mesh"):
                 filename = mesh.get("filename")
@@ -271,7 +288,7 @@ def parse_urdf(
         if parse_visuals_as_colliders:
             colliders = visuals
         else:
-            s = parse_shapes(link, visuals, density=0.0, just_visual=True)
+            s = parse_shapes(link, visuals, density=0.0, just_visual=True, visible=not hide_visuals)
             visual_shapes.extend(s)
 
         show_colliders = force_show_colliders
