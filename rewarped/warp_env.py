@@ -1,7 +1,8 @@
 import numpy as np
 import torch
-import warp as wp
 from gym import spaces
+
+import warp as wp
 
 from .autograd import UpdateFunction
 from .environment import Environment, IntegratorType, RenderMode

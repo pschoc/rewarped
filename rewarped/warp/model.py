@@ -16,7 +16,6 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 import warp as wp
-
 from warp.sim.inertia import (
     compute_box_inertia,
     compute_capsule_inertia,
