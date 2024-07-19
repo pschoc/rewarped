@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from sga.utils import Config
+from ...utils import Config
 from .env import BaseEnvConfig
 from .render import BaseRenderConfig
 from .sim import BaseSimConfig

@@ -10,7 +10,7 @@ from numpy import ndarray
 import pyvista as pv
 from pyvista.plotting.plotter import Plotter
 
-import sga
+from .. import config
 from .base import BaseRenderer
 
 
@@ -153,7 +153,7 @@ class Xvfb(object):
 
 class PyVistaRenderer(BaseRenderer, name='pv'):
 
-    def __init__(self, cfg: sga.config.physics.render.PyVistaRenderConfig) -> None:
+    def __init__(self, cfg: config.physics.render.PyVistaRenderConfig) -> None:
         super().__init__(cfg)
 
         self.background = cfg.background

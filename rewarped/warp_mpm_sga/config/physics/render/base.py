@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from sga.utils import Config
+from ....utils import Config
 
 from .camera import BaseCamera
 

@@ -30,7 +30,7 @@ except ImportError as e:
     print('Mistral API is not available, please install using `pip install mistralai`.')
     raise e
 
-from sga.config.llm import BaseLLMConfig
+from ..config.llm import BaseLLMConfig
 
 
 @dataclass

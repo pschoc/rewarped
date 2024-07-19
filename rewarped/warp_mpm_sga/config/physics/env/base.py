@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from sga.utils import Config
+from ....utils import Config
 from .physics import BasePhysicsConfig
 from .shape import BaseShapeConfig
 from .vel import BaseVelConfig

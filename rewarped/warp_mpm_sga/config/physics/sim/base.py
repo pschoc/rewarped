@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from sga.utils import Config
+from ....utils import Config
 
 @dataclass(kw_only=True)
 class BaseSimConfig(Config):

@@ -3,7 +3,7 @@ import torch.autograd as autograd
 import torch.nn as nn
 from torch import Tensor
 
-from sga.warp import Tape
+from ..warp import Tape
 from .mpm import MPMModel, MPMState, MPMStatics
 
 

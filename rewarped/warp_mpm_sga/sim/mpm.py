@@ -7,8 +7,8 @@ from torch import Tensor
 import warp as wp
 from warp.context import Devicelike
 
-import sga
-from sga.warp import Tape, CondTape
+from .. import config
+from ..warp import Tape, CondTape
 from .base import Statics, State, Model, ModelBuilder, StateInitializer, StaticsInitializer, ShapeLike
 
 
@@ -481,7 +481,7 @@ class MPMModelBuilder(ModelBuilder):
     ConstantType = MPMConstant
     ModelType = MPMModel
 
-    def parse_cfg(self, cfg: sga.config.physics.sim.BaseSimConfig) -> 'MPMModelBuilder':
+    def parse_cfg(self, cfg: config.physics.sim.BaseSimConfig) -> 'MPMModelBuilder':
 
         num_grids: int = cfg['num_grids']
         dt: float = cfg['dt']
@@ -548,7 +548,7 @@ class MPMInitData(object):
             self.center = self.pos.mean(0)
 
     @classmethod
-    def get(cls, cfg: sga.config.physics.env.BaseEnvConfig) -> 'MPMInitData':
+    def get(cls, cfg: config.physics.env.BaseEnvConfig) -> 'MPMInitData':
         kwargs: dict = None
         if cfg['shape']['name'].startswith('cube'):
             kwargs = cls.get_cube(

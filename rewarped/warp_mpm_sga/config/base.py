@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from sga.utils import Config
+from ..utils import Config
 from .optim import BaseOptimConfig
 from .llm import BaseLLMConfig
 from .physics import BasePhysicsConfig

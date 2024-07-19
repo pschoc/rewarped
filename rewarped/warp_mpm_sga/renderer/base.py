@@ -3,12 +3,12 @@ import subprocess
 
 import numpy as np
 
-import sga
-from sga.utils import Candidate
+from .. import config
+from ..utils import Candidate
 
 
 class BaseRenderer(Candidate):
-    def __init__(self, cfg: sga.config.physics.render.BaseRenderConfig) -> None:
+    def __init__(self, cfg: config.physics.render.BaseRenderConfig) -> None:
         super().__init__()
 
         self.width, self.height = cfg.width, cfg.height
