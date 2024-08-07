@@ -5,7 +5,7 @@ from gym import spaces
 import warp as wp
 
 from .autograd import UpdateFunction
-from .environment import Environment, IntegratorType, RenderMode
+from .environment import Environment, RenderMode
 from .warp.model_monkeypatch import Model_control, Model_state
 
 
@@ -224,14 +224,10 @@ class WarpEnv(Environment):
     def create_model(self):
         model = super().create_model()
 
+        def model_state_fn(model, *args, **kwargs):
+            return Model_state(model, *args, integrator_type=self.integrator_type.value, **kwargs)
+
         # monkeypatch model.state() function
-        model_state_fn = Model_state
-        if self.integrator_type == IntegratorType.FEATHERSTONE:
-
-            def model_state_featherstone(self, *args, **kwargs):
-                return Model_state(self, *args, featherstone=True, **kwargs)
-
-            model_state_fn = model_state_featherstone
         model.state = model_state_fn.__get__(model, model.__class__)
 
         # monkeypatch model.control() function

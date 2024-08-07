@@ -15,7 +15,7 @@ def get_copy_fn(copy):
         raise ValueError(copy)
 
 
-def Model_state(self: Model, requires_grad=None, copy="clone", featherstone=False) -> State:
+def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=None) -> State:
     s = State()
     if requires_grad is None:
         requires_grad = self.requires_grad
@@ -51,7 +51,7 @@ def Model_state(self: Model, requires_grad=None, copy="clone", featherstone=Fals
         s.joint_q = copy_fn(self.joint_q, requires_grad=requires_grad)
         s.joint_qd = copy_fn(self.joint_qd, requires_grad=requires_grad)
 
-    if featherstone:  # FeatherstoneIntegrator.allocate_state_aux_vars
+    if integrator_type == "featherstone":  # FeatherstoneIntegrator.allocate_state_aux_vars
         # allocate auxiliary variables that vary with state
         if self.body_count:
             # joints
