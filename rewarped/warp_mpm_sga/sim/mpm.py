@@ -255,6 +255,7 @@ class MPMModel(Model):
         super().__init__(constant, device)
         self.requires_grad = requires_grad
         self.grid_op = None
+        self.grid_op_name = None
 
         shape = (self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
         grid = MPMGridData()
@@ -520,9 +521,10 @@ class MPMModelBuilder(ModelBuilder):
 
     def finalize(self, device: Devicelike = None, requires_grad: bool = False) -> ModelType:
         model = super().finalize(device, requires_grad)
-        if self.config['bc'] == 'freeslip':
+        model.grid_op_name = self.config['bc']
+        if model.grid_op_name == 'freeslip':
             model.grid_op = MPMModel.grid_op_freeslip
-        elif self.config['bc'] == 'noslip':
+        elif model.grid_op_name == 'noslip':
             model.grid_op = MPMModel.grid_op_noslip
         else:
             raise ValueError('invalid boundary condition: {}'.format(self.config['bc']))
