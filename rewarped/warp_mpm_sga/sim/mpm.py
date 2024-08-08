@@ -543,6 +543,8 @@ class MPMInitData(object):
     center: np.ndarray = None
     ind_vel: np.ndarray = None
 
+    asset_root = Path(__file__).resolve().parent.parent.parent.parent / 'assets' / 'warp_mpm_sga'
+
     def __post_init__(self) -> None:
         if self.center is None:
             self.center = self.pos.mean(0)
@@ -583,7 +585,7 @@ class MPMInitData(object):
         center = np.array(center)
         size = np.array(size)
 
-        asset_root = Path(__file__).resolve().parent.parent / 'assets'
+        asset_root = cls.asset_root
         precompute_name = f'{name}_{resolution}_{mode}.npz'
 
         if (asset_root / precompute_name).is_file():
@@ -633,7 +635,7 @@ class MPMInitData(object):
             resolution: int,
             mode: str) -> dict[str, Any]:
 
-        asset_root = Path(__file__).resolve().parent.parent / 'assets'
+        asset_root = cls.asset_root
         size_str = '_'.join([str(s) for s in size])
         precompute_name = f'cube_{resolution}_{mode}_{size_str}.npz'
 
