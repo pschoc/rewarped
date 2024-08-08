@@ -10,6 +10,7 @@ from warp.context import Devicelike
 from .. import config
 from ..warp import Tape, CondTape
 from .base import Statics, State, Model, ModelBuilder, StateInitializer, StaticsInitializer, ShapeLike
+from . import shapes
 
 
 @wp.struct
@@ -559,6 +560,14 @@ class MPMInitData(object):
                 cfg['shape']['resolution'],
                 cfg['shape']['mode'],
             )
+        elif cfg['shape']['name'].startswith('cylinder'):
+            kwargs = cls.get_cylinder(
+                cfg['shape']['center'],
+                cfg['shape']['size'],
+                cfg['shape']['num_particles'],
+                cfg['shape']['vol'],
+                cfg['shape']['mode'],
+            )
         elif cfg['shape']['type'] == 'mesh':
             kwargs = cls.get_mesh(
                 cfg['shape']['name'],
@@ -658,6 +667,54 @@ class MPMInitData(object):
                 raise ValueError('invalid mode: {}'.format(mode))
 
             vol = np.prod(size) / p_x.shape[0]
+            np.savez(asset_root / precompute_name, p_x=p_x, vol=vol)
+
+        p_x = p_x + center
+        p_x = np.ascontiguousarray(p_x.reshape(-1, 3))
+        return {'num_particles': p_x.shape[0], 'vol': vol, 'pos': p_x, 'center': center}
+
+    @classmethod
+    def get_cylinder(
+            cls,
+            center: list | np.ndarray,
+            size: list | np.ndarray,
+            num_particles: int,
+            vol: float,
+            mode: str) -> dict[str, Any]:
+
+        asset_root = cls.asset_root
+        size_str = '_'.join([str(s) for s in size])
+        precompute_name = f'cylinder_{num_particles}_{mode}_{size_str}.npz'
+
+        center = np.array(center)
+        size = np.array(size)
+        h, r, _ = size
+
+        if (asset_root / precompute_name).is_file():
+            file = np.load(asset_root / precompute_name)
+            p_x = file['p_x']
+            assert vol == file['vol']
+        else:
+            if mode == 'uniform':
+                raise NotImplementedError
+            elif mode == 'random':
+                rng = np.random.Generator(np.random.PCG64(0))
+
+                sdf_func = shapes.compute_cylinder_sdf(h=h, r=r)
+                sample_func = shapes.box_particles(np.array([r, h, r]))
+
+                p_x = shapes.rejection_sampling(
+                    init_pos=np.array([0., 0., 0.]),
+                    n_particles=num_particles,
+                    sample_func=sample_func,
+                    sdf_func=sdf_func,
+                    rng=rng,
+                )
+            else:
+                raise ValueError('invalid mode: {}'.format(mode))
+
+            # TODO: compute volume if not provided
+
             np.savez(asset_root / precompute_name, p_x=p_x, vol=vol)
 
         p_x = p_x + center
