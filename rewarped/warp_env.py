@@ -249,7 +249,7 @@ class WarpEnv(Environment):
         self.env_offsets = torch.tensor(self.env_offsets, dtype=torch.float, device=self.device)
 
         self.state_0 = self.model.state()
-        self.state_1 = self.model.state(copy="empty")
+        self.state_1 = self.model.state(copy="zeros")
         self.states_mid = None
         self.control_0 = self.model.control()
 
@@ -262,16 +262,18 @@ class WarpEnv(Environment):
             if self.use_graph_capture:
                 self.tape = wp.Tape()
 
-                self.states_mid = [self.model.state(copy="empty") for _ in range(self.sim_substeps - 1)]
+                self.states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
 
-                self.state_0_bwd = self.model.state(copy="empty")
-                self.state_1_bwd = self.model.state(copy="empty")
-                self.states_mid_bwd = [self.model.state(copy="empty") for _ in range(self.sim_substeps - 1)]
+                self.state_0_bwd = self.model.state(copy="zeros")
+                self.state_1_bwd = self.model.state(copy="zeros")
+                self.states_mid_bwd = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
                 self.control_0_bwd = self.model.control()
 
                 # graph capture done inside first call to UpdateFunction.apply()
                 self.tape.update_graph = None
                 self.tape.bwd_update_graph = None
+            else:
+                self.states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
             self.state_tensors = [wp.to_torch(getattr(self.state_0, name)) for name in self.state_tensors_names]
             self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
         else:
@@ -356,7 +358,7 @@ class WarpEnv(Environment):
             update_params = (tape, self.integrator, self.model, self.use_graph_capture, self.synchronize)
             sim_params = (self.sim_substeps, self.sim_dt, self.kinematic_fk, self.eval_ik)
 
-            state_1 = self.model.state(copy="empty")  # TODO: could cache these if optim window is known
+            state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known
 
             if self.use_graph_capture:
                 assert tape is not None
@@ -369,7 +371,7 @@ class WarpEnv(Environment):
                 control_bwd = self.control_0_bwd
             else:
                 # states_mid = None
-                states_mid = [self.model.state(copy="empty") for _ in range(self.sim_substeps - 1)]
+                states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
 
                 states = (self.state_0, states_mid, state_1)
                 control = self.control_0
@@ -442,9 +444,9 @@ class WarpEnv(Environment):
     def reset_idx(self, env_ids):
         assert len(env_ids) == self.num_envs
         assert not self.early_termination
+        # reset state and control
         self.state_0 = self.model.state()
         self.control_0 = self.model.control()
-
         self.state_0.clear_forces()
         self.control_0.clear_acts()
 
@@ -456,6 +458,10 @@ class WarpEnv(Environment):
         if self.eval_fk:
             mask = None
             wp.sim.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, mask, self.state_0)
+            # TODO: wrap this in torch.autograd.Function?
+
+        self.state_tensors = [wp.to_torch(getattr(self.state_0, name)) for name in self.state_tensors_names]
+        self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
 
     def randomize_init(self, env_ids):
         raise NotImplementedError
