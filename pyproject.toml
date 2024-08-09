@@ -46,6 +46,7 @@ extend-exclude = [
     "build",
     "assets",
     "third_party",
+    "rewarped/warp_mpm_sga/*",
 ]
 
 [tool.ruff.lint]
