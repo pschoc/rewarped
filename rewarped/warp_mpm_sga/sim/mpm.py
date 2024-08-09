@@ -10,6 +10,7 @@ from warp.context import Devicelike
 from .. import config
 from ..warp import Tape, CondTape
 from .base import Statics, State, Model, ModelBuilder, StateInitializer, StaticsInitializer, ShapeLike
+from . import materials
 from . import shapes
 
 
@@ -19,11 +20,15 @@ class MPMStatics(Statics):
     vol: wp.array(dtype=float)
     rho: wp.array(dtype=float)
     clip_bound: wp.array(dtype=float)
+    material_id: wp.array(dtype=int)
+    material: wp.array(dtype=materials.MPMMaterial)
 
     def init(self, shape: ShapeLike, device: Devicelike = None) -> None:
         self.vol = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
         self.rho = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
         self.clip_bound = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
+        self.material_id = wp.zeros(shape=shape, dtype=int, device=device, requires_grad=False)
+        self.material = wp.zeros(shape=(0,), dtype=materials.MPMMaterial, device=device, requires_grad=False)
 
     def update_vol(self, sections: list[int], vols: list[float]) -> None:
         offset = 0
@@ -43,6 +48,17 @@ class MPMStatics(Statics):
             wp.launch(self.set_float, dim=self.clip_bound.shape, inputs=[
                 self.clip_bound, offset, offset + section, clip_bound], device=self.clip_bound.device)
             offset += section
+
+    def update_material(self, sections: list[int], material_ids: list[int], _materials: list[materials.MPMMaterial]) -> None:
+        offset = 0
+        for section, material_id in zip(sections, material_ids):
+            wp.launch(self.set_int, dim=self.material_id.shape, inputs=[
+                self.material_id, offset, offset + section, material_id], device=self.material_id.device)
+            offset += section
+
+        materials0 = self.material.numpy().tolist()
+        _materials = materials0 + _materials
+        self.material = wp.array(_materials, dtype=materials.MPMMaterial, device=self.material.device)
 
 
 @wp.struct
@@ -540,6 +556,8 @@ class MPMInitData(object):
     num_particles: int
     vol: float
 
+    material: materials.MPMMaterial
+
     pos: np.ndarray
     lin_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
     ang_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
@@ -581,7 +599,22 @@ class MPMInitData(object):
             )
         else:
             raise ValueError('invalid shape type: {}'.format(cfg['shape']['type']))
-        return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], **kwargs)
+
+        E = cfg['physics'].get('E', None)
+        if 'youngs_modulus_log' in cfg['physics']:
+            E = np.exp(cfg['physics']['youngs_modulus_log'])
+        nu = cfg['physics'].get('nu', None)
+        if 'poissons_ratio' in cfg['physics']:
+            nu = cfg['physics']['poissons_ratio']
+        yield_stress = cfg['physics'].get('yield_stress', None)
+        material = materials.get_material(
+            cfg['physics']['material'],
+            E=E,
+            nu=nu,
+            yield_stress=yield_stress,
+        )
+
+        return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], material=material, **kwargs)
 
     @classmethod
     def get_mesh(
@@ -796,21 +829,27 @@ class MPMStaticsInitializer(StaticsInitializer):
         self.rhos: list[float] = []
         self.clip_bounds: list[float] = []
 
+        self.material_ids: list[int] = []
+        self.materials: list[materials.MPMMaterial] = []
+
     def add_group(self, group: MPMInitData) -> None:
         self.groups.append(group)
 
     def finalize(self) -> StaticsType:
 
-        for group in self.groups:
+        for i, group in enumerate(self.groups):
             self.sections.append(group.num_particles)
 
             self.vols.append(group.vol)
             self.rhos.append(group.rho)
             self.clip_bounds.append(group.clip_bound)
+            self.material_ids.append(i)
+            self.materials.append(group.material)
 
         statics = super().finalize(shape=sum(self.sections))
         statics.update_vol(self.sections, self.vols)
         statics.update_rho(self.sections, self.rhos)
         statics.update_clip_bound(self.sections, self.clip_bounds)
+        statics.update_material(self.sections, self.material_ids, self.materials)
 
         return statics
