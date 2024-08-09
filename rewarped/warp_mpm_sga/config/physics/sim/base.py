@@ -11,3 +11,6 @@ class BaseSimConfig(Config):
     bound: int = 3
     eps: float = 1e-7
     skip_frames: int = 1
+
+    body_friction: float = 0.0
+    body_softness: float = 0.0

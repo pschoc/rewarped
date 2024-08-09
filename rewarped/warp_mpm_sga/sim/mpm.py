@@ -7,6 +7,14 @@ from torch import Tensor
 import warp as wp
 from warp.context import Devicelike
 
+from warp.sim.model import ModelShapeGeometry
+from warp.sim.collide import sphere_sdf, sphere_sdf_grad
+from warp.sim.collide import box_sdf, box_sdf_grad
+from warp.sim.collide import capsule_sdf, capsule_sdf_grad
+from warp.sim.collide import cylinder_sdf, cylinder_sdf_grad
+from warp.sim.collide import cone_sdf, cone_sdf_grad
+from warp.sim.collide import plane_sdf
+
 from .. import config
 from ..warp import Tape, CondTape
 from .base import Statics, State, Model, ModelBuilder, StateInitializer, StaticsInitializer, ShapeLike
@@ -197,6 +205,7 @@ class MPMGridData(object):
 @wp.struct
 class MPMConstant(object):
 
+    num_envs: int = 1
     num_grids: int
     dt: float
     bound: int
@@ -204,6 +213,8 @@ class MPMConstant(object):
     dx: float
     inv_dx: float
     eps: float
+    body_friction: float
+    body_softness: float
 
 
 class MPMState(State):
@@ -314,7 +325,8 @@ class MPMModel(Model):
         self.grid_op = None
         self.grid_op_name = None
 
-        shape = (self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
+        # TODO: assumes parallel envs are stacked along +x dim only
+        shape = (self.constant.num_envs * self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
         grid = MPMGridData()
         grid.init(shape, device, requires_grad)
         self.grid = grid
@@ -475,6 +487,170 @@ class MPMModel(Model):
 
     @staticmethod
     @wp.kernel
+    def grid_op_dexdeform(
+        constant: MPMConstant,
+        grid: MPMGridData,
+        shape_X_bs: wp.array(dtype=wp.transform),
+        shape_body: wp.array(dtype=int),
+        body_geo: ModelShapeGeometry,
+        num_shapes_per_env: int,
+        body_curr: wp.array(dtype=wp.transform),
+        body_next: wp.array(dtype=wp.transform),
+    ) -> None:
+
+        env_id, ex, py, pz = wp.tid()
+        px = constant.num_grids * env_id + ex  # TODO: assumes parallel envs are stacked along +x dim only
+
+        v = wp.vec3(0.0)
+        if (grid.m[px, py, pz] > constant.eps):
+
+            # normalization
+            v = grid.mv[px, py, pz] * (1.0 / grid.m[px, py, pz])
+
+            # gravity
+            v = v + constant.gravity * constant.dt
+
+            gx = wp.vec3(
+                float(px) * constant.dx,
+                float(py) * constant.dx,
+                float(pz) * constant.dx,
+            )
+
+            shape_start = env_id * num_shapes_per_env
+            shape_end = shape_start + num_shapes_per_env
+
+            # rigid body interaction
+            v = MPMModel._grid_op_dexdeform_body(
+                v,
+                gx,
+                constant,
+                shape_X_bs,
+                shape_body,
+                body_geo,
+                shape_start,
+                shape_end,
+                body_curr,
+                body_next,
+            )
+
+            # boundary condition
+            if ex < constant.bound and v[0] < 0.0:
+                v = wp.vec3(0.0, v[1], v[2])
+            if py < constant.bound and v[1] < 0.0:
+                v = wp.vec3(v[0], 0.0, v[2])
+            if pz < constant.bound and v[2] < 0.0:
+                v = wp.vec3(v[0], v[1], 0.0)
+            if ex > constant.num_grids - constant.bound and v[0] > 0.0:
+                v = wp.vec3(0.0, v[1], v[2])
+            if py > constant.num_grids - constant.bound and v[1] > 0.0:
+                v = wp.vec3(v[0], 0.0, v[2])
+            if pz > constant.num_grids - constant.bound and v[2] > 0.0:
+                v = wp.vec3(v[0], v[1], 0.0)
+
+            # TODO: ground_friction
+
+        grid.v[px, py, pz] = v
+
+    @staticmethod
+    @wp.func
+    def _grid_op_dexdeform_body(
+        v_in: wp.vec3,
+        gx: wp.vec3,
+        constant: MPMConstant,
+        shape_X_bs: wp.array(dtype=wp.transform),
+        shape_body: wp.array(dtype=int),
+        body_geo: ModelShapeGeometry,
+        shape_start: int,
+        shape_end: int,
+        body_curr: wp.array(dtype=wp.transform),
+        body_next: wp.array(dtype=wp.transform),
+    ) -> wp.vec3:
+
+        v = wp.vec3f(v_in)
+        for shape_index in range(shape_start, shape_end):
+            body_index = shape_body[shape_index]
+
+            X_wb = wp.transform_identity()
+            X_wb_next = wp.transform_identity()
+            if body_index >= 0:
+                X_wb = body_curr[body_index]
+                X_wb_next = body_next[body_index]
+
+            X_bs = shape_X_bs[shape_index]
+
+            X_ws = wp.transform_multiply(X_wb, X_bs)
+            X_sw = wp.transform_inverse(X_ws)
+
+            # transform particle position to shape local space
+            x_local = wp.transform_point(X_sw, gx)
+
+            # geo description
+            geo_type = body_geo.type[shape_index]
+            geo_scale = body_geo.scale[shape_index]
+
+            # evaluate shape sdf
+            d = 1.0e6
+            n = wp.vec3()
+
+            if geo_type == wp.sim.GEO_SPHERE:
+                d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
+                n = sphere_sdf_grad(wp.vec3(), geo_scale[0], x_local)
+
+            if geo_type == wp.sim.GEO_BOX:
+                d = box_sdf(geo_scale, x_local)
+                n = box_sdf_grad(geo_scale, x_local)
+
+            if geo_type == wp.sim.GEO_CAPSULE:
+                d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = capsule_sdf_grad(geo_scale[0], geo_scale[1], x_local)
+
+            if geo_type == wp.sim.GEO_CYLINDER:
+                d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = cylinder_sdf_grad(geo_scale[0], geo_scale[1], x_local)
+
+            if geo_type == wp.sim.GEO_CONE:
+                d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = cone_sdf_grad(geo_scale[0], geo_scale[1], x_local)
+
+            # TODO: geo_type == wp.sim.GEO_MESH
+
+            # TODO: geo_type == wp.sim.GEO_SDF
+
+            if geo_type == wp.sim.GEO_PLANE:
+                d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = wp.vec3(0.0, 1.0, 0.0)
+
+            n = wp.normalize(n)
+
+            # contact point in body local space
+            body_pos = wp.transform_point(X_bs, x_local - n * d)
+
+            # body position in world space
+            bx = wp.transform_point(X_wb, body_pos)
+
+            normal = wp.transform_vector(X_ws, n)
+            dist = wp.dot(normal, gx - bx)
+
+            friction = constant.body_friction
+            softness = constant.body_softness
+            influence = wp.min(wp.exp(-dist * softness), 1.)
+
+            if (influence > 0.1) or (dist <= 0):
+                bv = (wp.transform_point(X_wb_next, wp.transform_point(X_bs, x_local)) - gx) / constant.dt
+                rel_v = v - bv
+
+                normal_component = wp.dot(rel_v, normal)
+                grid_v_t = rel_v - wp.min(normal_component, 0.) * normal
+
+                if (normal_component < 0) and (wp.dot(grid_v_t, grid_v_t) > 1e-30):
+                    # apply friction
+                    grid_v_t_norm = wp.length(grid_v_t)
+                    grid_v_t = grid_v_t * (1. / grid_v_t_norm) * wp.max(0., grid_v_t_norm + normal_component * friction)
+                v = bv + rel_v * (1. - influence) + grid_v_t * influence
+        return v
+
+    @staticmethod
+    @wp.kernel
     def g2p(
             constant: ConstantType,
             statics: StaticsType,
@@ -526,8 +702,9 @@ class MPMModel(Model):
 
         bound = statics.clip_bound[p] * constant.dx
         new_x = particle_curr.x[p] + constant.dt * new_v
+        # TODO: assumes parallel envs are stacked along +x dim only
         new_x = wp.vec3(
-            wp.clamp(new_x[0], 0.0 + bound, 1.0 - bound),
+            wp.clamp(new_x[0], 0.0 + bound, 1.0 * float(constant.num_envs) - bound),
             wp.clamp(new_x[1], 0.0 + bound, 1.0 - bound),
             wp.clamp(new_x[2], 0.0 + bound, 1.0 - bound),
         )
@@ -556,18 +733,22 @@ class MPMModelBuilder(ModelBuilder):
     ConstantType = MPMConstant
     ModelType = MPMModel
 
-    def parse_cfg(self, cfg: config.physics.sim.BaseSimConfig) -> 'MPMModelBuilder':
+    def parse_cfg(self, cfg: config.physics.sim.BaseSimConfig, num_envs: int = 1) -> 'MPMModelBuilder':
 
         num_grids: int = cfg['num_grids']
         dt: float = cfg['dt']
         bound: int = cfg['bound']
         gravity: np.ndarray = np.array(cfg['gravity'], dtype=np.float32)
-        bc: str = cfg['bc']
+        bc: str = cfg['bc']  # boundary condition
         eps: float = cfg['eps']
 
         dx: float = 1 / num_grids
         inv_dx: float = float(num_grids)
 
+        body_friction: float = cfg['body_friction']
+        body_softness: float = cfg['body_softness']
+
+        self.config['num_envs'] = num_envs
         self.config['num_grids'] = num_grids
         self.config['dt'] = dt
         self.config['bound'] = bound
@@ -577,11 +758,15 @@ class MPMModelBuilder(ModelBuilder):
         self.config['bc'] = bc
         self.config['eps'] = eps
 
+        self.config['body_friction'] = body_friction
+        self.config['body_softness'] = body_softness
+
         return self
 
     def build_constant(self) -> ConstantType:
 
         constant = super().build_constant()
+        constant.num_envs = self.config['num_envs']
         constant.num_grids = self.config['num_grids']
         constant.dt = self.config['dt']
         constant.bound = self.config['bound']
@@ -589,6 +774,9 @@ class MPMModelBuilder(ModelBuilder):
         constant.dx = self.config['dx']
         constant.inv_dx = self.config['inv_dx']
         constant.eps = self.config['eps']
+
+        constant.body_friction = self.config['body_friction']
+        constant.body_softness = self.config['body_softness']
 
         return constant
 
@@ -599,6 +787,8 @@ class MPMModelBuilder(ModelBuilder):
             model.grid_op = MPMModel.grid_op_freeslip
         elif model.grid_op_name == 'noslip':
             model.grid_op = MPMModel.grid_op_noslip
+        elif model.grid_op_name == 'dexdeform':
+            model.grid_op = MPMModel.grid_op_dexdeform
         else:
             raise ValueError('invalid boundary condition: {}'.format(self.config['bc']))
         return model
