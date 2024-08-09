@@ -349,7 +349,7 @@ class WarpEnv(Environment):
         if self.requires_grad:
             tape = self.tape
             update_params = (tape, self.integrator, self.model, self.use_graph_capture, self.synchronize)
-            sim_params = (self.sim_substeps, self.sim_dt, self.eval_ik)
+            sim_params = (self.sim_substeps, self.sim_dt, self.kinematic_fk, self.eval_ik)
 
             state_1 = self.model.state(copy="empty")  # TODO: could cache these if optim window is known
 
@@ -386,7 +386,8 @@ class WarpEnv(Environment):
                 *tensors,
             )
 
-            self.state_tensors = list(outputs[:len(self.state_tensors)])
+            num_state = len(self.state_tensors_names)
+            self.state_tensors = list(outputs[:num_state])
             self.state_1 = self.state_0  # needed for renderer
             self.state_0 = state_1
 
@@ -396,7 +397,7 @@ class WarpEnv(Environment):
             if self.use_graph_capture:
                 wp.capture_launch(self.update_graph)
             else:
-                super().update()
+                self.update()
         self.sim_time += self.frame_dt
 
     def step(self, actions):

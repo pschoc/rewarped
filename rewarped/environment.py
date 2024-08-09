@@ -19,6 +19,8 @@ import warp as wp
 import warp.sim
 import warp.sim.render
 
+from .warp_utils import eval_kinematic_fk
+
 
 class RenderMode(Enum):
     NONE = "none"
@@ -131,6 +133,8 @@ class Environment:
 
     # whether to apply model.joint_q, joint_qd to bodies before simulating
     eval_fk: bool = True
+    # whether to set state.body_q based on state.joint_q
+    kinematic_fk: bool = False
     # whether to update state.joint_q, state.joint_qd
     eval_ik: bool = False
 
@@ -369,6 +373,9 @@ class Environment:
     def update(self):
         control = self.control_0
         for i in range(self.sim_substeps):
+            if self.kinematic_fk:
+                eval_kinematic_fk(self.model, self.state_0, self.state_1, self.sim_dt, self.sim_substeps, control)
+
             self.state_0.clear_forces()
             wp.sim.collide(self.model, self.state_0)
             self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt, control=control)
