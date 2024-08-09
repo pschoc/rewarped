@@ -48,6 +48,7 @@ def parse_mjcf(
     reduce_capsule_height_by_radius=False,
     parse_meshes=True,
     up_axis="Z",
+    ignore_names=(),
     ignore_classes=None,
     visual_classes=("visual",),
     collider_classes=("collision",),
@@ -140,11 +141,13 @@ def parse_mjcf(
                 # handle stl relative paths
                 if not os.path.isabs(fname):
                     fname = os.path.abspath(os.path.join(mjcf_dirname, fname))
-                if "name" in mesh.attrib:
-                    mesh_assets[mesh.attrib["name"]] = fname
-                else:
-                    name = ".".join(os.path.basename(fname).split(".")[:-1])
-                    mesh_assets[name] = fname
+                name = mesh.attrib.get("name", ".".join(os.path.basename(fname).split(".")[:-1]))
+                s = mesh.attrib.get("scale", "1.0 1.0 1.0")
+                s = np.fromstring(s, sep=" ", dtype=np.float32)
+                mesh_assets[name] = {
+                    "file": fname,
+                    "scale": s,
+                }
 
     class_parent = {}
     class_children = {}
@@ -267,6 +270,14 @@ def parse_mjcf(
             if "mesh" in geom_attrib:
                 geom_type = "mesh"
 
+            ignore_geom = False
+            for pattern in ignore_names:
+                if re.match(pattern, geom_name):
+                    ignore_geom = True
+                    break
+            if ignore_geom:
+                continue
+
             geom_size = parse_vec(geom_attrib, "size", [1.0, 1.0, 1.0]) * scale
             geom_pos = parse_vec(geom_attrib, "pos", (0.0, 0.0, 0.0)) * scale
             geom_rot = parse_orientation(geom_attrib)
@@ -306,9 +317,12 @@ def parse_mjcf(
 
                 # use force='mesh' to load the mesh as a trimesh object
                 # with baked in transforms, e.g. from COLLADA files
-                stl_file = mesh_assets[geom_attrib["mesh"]]
+                stl_file = mesh_assets[geom_attrib["mesh"]]["file"]
                 m = trimesh.load(stl_file, force="mesh")
-                mesh_scale = parse_vec(geom_defaults["mesh"], "scale", [1.0, 1.0, 1.0])
+                if "mesh" in geom_defaults:
+                    mesh_scale = parse_vec(geom_defaults["mesh"], "scale", mesh_assets[geom_attrib["mesh"]]["scale"])
+                else:
+                    mesh_scale = mesh_assets[geom_attrib["mesh"]]["scale"]
                 scaling = np.array(mesh_scale) * scale
                 # as per the Mujoco XML reference, ignore geom size attribute
                 assert len(geom_size) == 3, "need to specify size for mesh geom"
@@ -391,7 +405,7 @@ def parse_mjcf(
                 else:
                     half_height = geom_radius
                     if reduce_capsule_height_by_radius:
-                        half_height = geom_height - geom_radius
+                        half_height = geom_height - (0.5 * geom_radius)
                     s = builder.add_shape_capsule(
                         link,
                         pos=geom_pos,
@@ -575,6 +589,8 @@ def parse_mjcf(
                 builder.add_joint_fixed(-1, link, parent_xform=_xform, name="fixed_base")
         else:
             joint_pos = joint_pos[0] if len(joint_pos) > 0 else (0.0, 0.0, 0.0)
+            if len(joint_name) == 0:
+                joint_name = [f"{body_name}_joint"]
             builder.add_joint(
                 joint_type,
                 parent,
@@ -633,7 +649,7 @@ def parse_mjcf(
         if parse_visuals_as_colliders:
             colliders = visuals
         else:
-            s = parse_shapes(defaults, body_name, link, visuals, density=0.0, just_visual=True, visible=not hide_visuals)
+            s = parse_shapes(defaults, body_name, link, visuals, 0.0, just_visual=True, visible=not hide_visuals)
             visual_shapes.extend(s)
 
         show_colliders = force_show_colliders
@@ -665,7 +681,7 @@ def parse_mjcf(
             else:
                 fullinertia = inertial_attrib.get("fullinertia")
                 assert fullinertia is not None
-                fullinertia = np.fromstring(fullinertia, sep= " ", dtype=np.float32)
+                fullinertia = np.fromstring(fullinertia, sep=" ", dtype=np.float32)
                 I_m = np.zeros((3, 3))
                 I_m[0, 0] = fullinertia[0] * scale**2
                 I_m[1, 1] = fullinertia[1] * scale**2
