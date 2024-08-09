@@ -112,6 +112,7 @@ class WarpEnv(Environment):
         device="cuda:0",
         use_graph_capture=True,
         synchronize=False,
+        max_unroll=16,
         debug=False,
     ):
         super().__init__()
@@ -124,32 +125,36 @@ class WarpEnv(Environment):
         self.num_envs = num_envs
         self.no_grad = no_grad
         self.device = device
-        self.use_graph_capture = use_graph_capture
+        self.use_graph_capture = use_graph_capture and "cuda" in device
         self.synchronize = synchronize
 
         if debug:
-            wp.set_module_options(
-                {
-                    "verify_fp": True,
-                    "verify_cuda": True,
-                    "print_launches": True,
-                    "mode": "debug",
-                    "verbose": True,
-                    "verbose_warnings": True,
-                    # "kernel_cache_dir": None,
-                    "enable_backward": self.requires_grad,
-                    "max_unroll": 16,
-                }
-            )
+            import faulthandler
+
+            faulthandler.enable()
+
+            options = {
+                "verify_fp": True,
+                "verify_cuda": True,
+                "print_launches": True,
+                "mode": "debug",
+                "verbose": True,
+                "verbose_warnings": True,
+                # "kernel_cache_dir": None,  # TODO: expects str
+                "enable_backward": self.requires_grad,
+                "max_unroll": max_unroll,
+            }
+            # Make sure Warp was built with `build_lib.py --mode=debug`
+            assert wp.context.runtime.core.is_debug_enabled()
         else:
-            wp.set_module_options(
-                {
-                    "verify_fp": False,
-                    # "kernel_cache_dir": None,
-                    "enable_backward": self.requires_grad,
-                    "max_unroll": 16,
-                }
-            )
+            options = {
+                "verify_fp": False,
+                # "kernel_cache_dir": None,  # TODO: expects str
+                "enable_backward": self.requires_grad,
+                "max_unroll": max_unroll,
+            }
+        for k, v in options.items():
+            setattr(wp.config, k, v)
         print("Warp options:", wp.get_module_options())
 
         # WarpEnv parameters
