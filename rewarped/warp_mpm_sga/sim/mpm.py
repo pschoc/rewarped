@@ -119,6 +119,27 @@ class MPMParticleData(object):
         clone.stress = wp.clone(self.stress, requires_grad=requires_grad)
         return clone
 
+    def zeros(self, requires_grad: Optional[bool] = None) -> 'MPMParticleData':
+        zeros = MPMParticleData()
+        zeros.x = wp.zeros_like(self.x, requires_grad=requires_grad)
+        zeros.v = wp.zeros_like(self.v, requires_grad=requires_grad)
+        zeros.C = wp.zeros_like(self.C, requires_grad=requires_grad)
+        zeros.F = wp.zeros_like(self.F, requires_grad=requires_grad)
+        zeros.init_F()
+        zeros.stress = wp.zeros_like(self.stress, requires_grad=requires_grad)
+        return zeros
+
+    def empty(self, requires_grad: Optional[bool] = None) -> 'MPMParticleData':
+        empty = MPMParticleData()
+        empty.x = wp.empty_like(self.x, requires_grad=requires_grad)
+        empty.v = wp.empty_like(self.v, requires_grad=requires_grad)
+        empty.C = wp.empty_like(self.C, requires_grad=requires_grad)
+        empty.F = wp.empty_like(self.F, requires_grad=requires_grad)
+        # empty.init_F()
+        empty.stress = wp.empty_like(self.stress, requires_grad=requires_grad)
+        return empty
+
+
 @wp.struct
 class MPMGridData(object):
 
@@ -152,6 +173,19 @@ class MPMGridData(object):
         clone.m = wp.clone(self.m, requires_grad=requires_grad)
         return clone
 
+    def zeros(self, requires_grad: Optional[bool] = None) -> 'MPMGridData':
+        zeros = MPMGridData()
+        zeros.v = wp.zeros_like(self.v, requires_grad=requires_grad)
+        zeros.mv = wp.zeros_like(self.mv, requires_grad=requires_grad)
+        zeros.m = wp.zeros_like(self.m, requires_grad=requires_grad)
+        return zeros
+
+    def empty(self, requires_grad: Optional[bool] = None) -> 'MPMGridData':
+        clone = MPMGridData()
+        clone.v = wp.empty_like(self.v, requires_grad=requires_grad)
+        clone.mv = wp.empty_like(self.mv, requires_grad=requires_grad)
+        clone.m = wp.empty_like(self.m, requires_grad=requires_grad)
+        return clone
 
 @wp.struct
 class MPMConstant(object):
@@ -784,7 +818,7 @@ class MPMStateInitializer(StateInitializer):
     def add_group(self, group: MPMInitData) -> None:
         self.groups.append(group)
 
-    def finalize(self) -> tuple[StateType, list[int]]:
+    def finalize(self, requires_grad: bool = False) -> tuple[StateType, list[int]]:
 
         pos_groups = []
         vel_groups = []
@@ -807,7 +841,7 @@ class MPMStateInitializer(StateInitializer):
         pos_groups = np.concatenate(pos_groups, axis=0)
         vel_groups = np.concatenate(vel_groups, axis=0)
 
-        state_0 = super().finalize(shape=pos_groups.shape[0], requires_grad=False)
+        state_0 = super().finalize(shape=pos_groups.shape[0], requires_grad=requires_grad)
 
         state_0.particle.x.assign(pos_groups)
         state_0.particle.v.assign(vel_groups)
