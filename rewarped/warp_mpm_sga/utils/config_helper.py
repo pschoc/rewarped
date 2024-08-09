@@ -40,6 +40,11 @@ class Config(Candidate):
             cls.candidates[name] = cls
             cls.name = name
 
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self:
+            return self[key]
+        return default
+
     def update(self, args: list[str]) -> None:
         kwargs = {}
         for i, arg in enumerate(args):
