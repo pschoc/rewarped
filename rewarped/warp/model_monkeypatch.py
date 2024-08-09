@@ -6,7 +6,7 @@ from warp.sim.model import Control, Model, State
 
 def get_copy_fn(copy):
     if copy == "clone":
-        return wp.clone
+        return wp.clone  # NOTE: will copy array.grad, https://github.com/NVIDIA/warp/issues/272#issuecomment-2239791350
     elif copy == "zeros":
         return wp.zeros_like
     elif copy == "empty":
@@ -88,6 +88,31 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
             )
 
         s._featherstone_augmented = True
+
+    if integrator_type == "mpm":
+        if copy == "clone":
+            s.mpm_particle = self.mpm_state.particle.clone(requires_grad)
+            s.mpm_grid = self.mpm_model.grid.clone(requires_grad)
+        elif copy == "zeros":
+            s.mpm_particle = self.mpm_state.particle.zeros(requires_grad)
+            s.mpm_grid = self.mpm_model.grid.zeros(requires_grad)
+        elif copy == "empty":
+            s.mpm_particle = self.mpm_state.particle.empty(requires_grad)
+            s.mpm_grid = self.mpm_model.grid.empty(requires_grad)
+        else:
+            raise ValueError(copy)
+
+        # add references
+        s.mpm_x = s.mpm_particle.x
+        s.mpm_v = s.mpm_particle.v
+        s.mpm_C = s.mpm_particle.C
+        s.mpm_F_trial = s.mpm_particle.F_trial
+        s.mpm_F = s.mpm_particle.F
+        s.mpm_stress = s.mpm_particle.stress
+
+        s.mpm_grid_v = s.mpm_grid.v
+        s.mpm_grid_mv = s.mpm_grid.mv
+        s.mpm_grid_m = s.mpm_grid.m
 
     return s
 
