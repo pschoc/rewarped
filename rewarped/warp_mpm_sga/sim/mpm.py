@@ -1003,6 +1003,10 @@ class MPMInitData(object):
         p_x = np.ascontiguousarray(p_x.reshape(-1, 3))
         return {'num_particles': p_x.shape[0], 'vol': vol, 'pos': p_x, 'center': center}
 
+    def set_center(self, value: list | np.ndarray) -> None:
+        self.pos = self.pos - self.center + np.array(value)
+        self.center = np.array(value)
+
     def set_lin_vel(self, value: list | np.ndarray) -> None:
         self.lin_vel = np.array(value)
 
