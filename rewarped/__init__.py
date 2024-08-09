@@ -14,3 +14,7 @@ from .warp.model import ModelBuilder
 wp.sim.ModelBuilder = ModelBuilder
 
 wp.init()
+
+from .warp.integrator_mpm import MPMIntegrator
+
+wp.sim.MPMIntegrator = MPMIntegrator

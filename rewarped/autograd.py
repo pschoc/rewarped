@@ -2,10 +2,12 @@ import torch
 
 import warp as wp
 
+from .warp_utils import eval_kinematic_fk
+
 
 def update(update_params, sim_params, states, control):
     tape, integrator, model, use_graph_capture, synchronize = update_params
-    sim_substeps, sim_dt, eval_ik = sim_params
+    sim_substeps, sim_dt, kinematic_fk, eval_ik = sim_params
     state_in, states_mid, state_out = states
 
     state_0 = state_in
@@ -13,7 +15,10 @@ def update(update_params, sim_params, states, control):
         if i == sim_substeps - 1:
             state_1 = state_out
         else:
-            state_1 = states_mid[i] if states_mid is not None else model.state(copy="empty")
+            state_1 = states_mid[i] if states_mid is not None else model.state(copy="zeros")
+
+        if kinematic_fk:
+            eval_kinematic_fk(model, state_0, state_1, sim_dt, sim_substeps, control)
 
         state_0.clear_forces()
         wp.sim.collide(model, state_0)
@@ -25,18 +30,18 @@ def update(update_params, sim_params, states, control):
 
 
 # for checkpointing method
-def assign_tensors(x, x_bwd, names, tensors):
+def assign_tensors(x, x_out, names, tensors):
     # need to assign b/c state_0, state_1 cannot be swapped
     for name in dir(x):
         if name in names:
             continue
         attr = getattr(x, name)
         if isinstance(attr, wp.array):
-            wp_array = getattr(x_bwd, name)
+            wp_array = getattr(x_out, name)
             wp_array.assign(attr)
     for name, tensor in zip(names, tensors):
         # assert not torch.isnan(tensor).any(), print("NaN tensor", name)
-        wp_array = getattr(x_bwd, name)
+        wp_array = getattr(x_out, name)
         wp_array.assign(wp.from_torch(tensor, dtype=wp_array.dtype))
 
 
@@ -64,12 +69,12 @@ class UpdateFunction(torch.autograd.Function):
         *tensors,
     ):
         tape, integrator, model, use_graph_capture, synchronize = update_params
-        sim_substeps, sim_dt, eval_ik = sim_params
+        sim_substeps, sim_dt, kinematic_fk, eval_ik = sim_params
         state_in, states_mid, state_out = states
         state_in_bwd, states_mid_bwd, state_out_bwd = states_bwd
 
-        state_tensors = tensors[:len(state_tensors_names)]
-        control_tensors = tensors[len(state_tensors_names):]
+        num_state = len(state_tensors_names)
+        state_tensors, control_tensors = tensors[:num_state], tensors[num_state:]
 
         if synchronize:
             # ensure Torch operations complete before running Warp
@@ -122,7 +127,7 @@ class UpdateFunction(torch.autograd.Function):
             assign_tensors(state_in, state_in_bwd, state_tensors_names, state_tensors)
             assign_tensors(control, control_bwd, control_tensors_names, control_tensors)
             wp.capture_launch(integrator.update_graph)
-            assign_tensors(state_out_bwd, state_out, [], [])
+            assign_tensors(state_out_bwd, state_out, [], [])  # write to state_out
         else:
             with tape:
                 update(update_params, sim_params, states, control)
@@ -164,7 +169,7 @@ class UpdateFunction(torch.autograd.Function):
         control_tensors = ctx.control_tensors
 
         tape, integrator, model, use_graph_capture, synchronize = update_params
-        sim_substeps, sim_dt, eval_ik = sim_params
+        sim_substeps, sim_dt, kinematic_fk, eval_ik = sim_params
         state_in, states_mid, state_out = states
         state_in_bwd, states_mid_bwd, state_out_bwd = states_bwd
 
@@ -178,8 +183,8 @@ class UpdateFunction(torch.autograd.Function):
         # ensure grads are contiguous in memory
         adj_tensors = [adj_tensor.contiguous() for adj_tensor in adj_tensors]
 
-        adj_state_tensors = adj_tensors[:len(state_tensors_names)]
-        adj_control_tensors = adj_tensors[len(state_tensors_names):]
+        num_state = len(state_tensors_names)
+        adj_state_tensors, adj_control_tensors = adj_tensors[:num_state], adj_tensors[num_state:]
 
         if synchronize:
             # ensure Torch operations complete before running Warp

@@ -7,9 +7,19 @@ from torch import Tensor
 import warp as wp
 from warp.context import Devicelike
 
+from warp.sim.model import ModelShapeGeometry
+from warp.sim.collide import sphere_sdf, sphere_sdf_grad
+from warp.sim.collide import box_sdf, box_sdf_grad
+from warp.sim.collide import capsule_sdf, capsule_sdf_grad
+from warp.sim.collide import cylinder_sdf, cylinder_sdf_grad
+from warp.sim.collide import cone_sdf, cone_sdf_grad
+from warp.sim.collide import plane_sdf
+
 from .. import config
 from ..warp import Tape, CondTape
 from .base import Statics, State, Model, ModelBuilder, StateInitializer, StaticsInitializer, ShapeLike
+from . import materials
+from . import shapes
 
 
 @wp.struct
@@ -18,11 +28,15 @@ class MPMStatics(Statics):
     vol: wp.array(dtype=float)
     rho: wp.array(dtype=float)
     clip_bound: wp.array(dtype=float)
+    material_id: wp.array(dtype=int)
+    material: wp.array(dtype=materials.MPMMaterial)
 
     def init(self, shape: ShapeLike, device: Devicelike = None) -> None:
         self.vol = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
         self.rho = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
         self.clip_bound = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
+        self.material_id = wp.zeros(shape=shape, dtype=int, device=device, requires_grad=False)
+        self.material = wp.zeros(shape=(0,), dtype=materials.MPMMaterial, device=device, requires_grad=False)
 
     def update_vol(self, sections: list[int], vols: list[float]) -> None:
         offset = 0
@@ -43,6 +57,17 @@ class MPMStatics(Statics):
                 self.clip_bound, offset, offset + section, clip_bound], device=self.clip_bound.device)
             offset += section
 
+    def update_material(self, sections: list[int], material_ids: list[int], _materials: list[materials.MPMMaterial]) -> None:
+        offset = 0
+        for section, material_id in zip(sections, material_ids):
+            wp.launch(self.set_int, dim=self.material_id.shape, inputs=[
+                self.material_id, offset, offset + section, material_id], device=self.material_id.device)
+            offset += section
+
+        materials0 = self.material.numpy().tolist()
+        _materials = materials0 + _materials
+        self.material = wp.array(_materials, dtype=materials.MPMMaterial, device=self.material.device)
+
 
 @wp.struct
 class MPMParticleData(object):
@@ -52,6 +77,7 @@ class MPMParticleData(object):
     C: wp.array(dtype=wp.mat33)
     stress: wp.array(dtype=wp.mat33)
 
+    F_trial: wp.array(dtype=wp.mat33)
     F: wp.array(dtype=wp.mat33)
 
     @staticmethod
@@ -61,15 +87,16 @@ class MPMParticleData(object):
         F[p] = wp.identity(n=3, dtype=float)
 
     def init_F(self) -> None:
+        wp.launch(self.init_F_kernel, dim=self.F_trial.shape, inputs=[self.F_trial], device=self.F_trial.device)
         wp.launch(self.init_F_kernel, dim=self.F.shape, inputs=[self.F], device=self.F.device)
 
     def init(self, shape: ShapeLike, device: Devicelike = None, requires_grad: bool = False) -> None:
-
         self.x = wp.zeros(shape=shape, dtype=wp.vec3, device=device, requires_grad=requires_grad)
         self.v = wp.zeros(shape=shape, dtype=wp.vec3, device=device, requires_grad=requires_grad)
         self.C = wp.zeros(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
         self.stress = wp.zeros(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
 
+        self.F_trial = wp.empty(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
         self.F = wp.empty(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
         self.init_F()
 
@@ -88,6 +115,8 @@ class MPMParticleData(object):
             self.v.grad.zero_()
         if self.C.requires_grad:
             self.C.grad.zero_()
+        if self.F_trial.requires_grad:
+            self.F_trial.grad.zero_()
         if self.F.requires_grad:
             self.F.grad.zero_()
         if self.stress.requires_grad:
@@ -98,9 +127,33 @@ class MPMParticleData(object):
         clone.x = wp.clone(self.x, requires_grad=requires_grad)
         clone.v = wp.clone(self.v, requires_grad=requires_grad)
         clone.C = wp.clone(self.C, requires_grad=requires_grad)
+        clone.F_trial = wp.clone(self.F_trial, requires_grad=requires_grad)
         clone.F = wp.clone(self.F, requires_grad=requires_grad)
         clone.stress = wp.clone(self.stress, requires_grad=requires_grad)
         return clone
+
+    def zeros(self, requires_grad: Optional[bool] = None) -> 'MPMParticleData':
+        zeros = MPMParticleData()
+        zeros.x = wp.zeros_like(self.x, requires_grad=requires_grad)
+        zeros.v = wp.zeros_like(self.v, requires_grad=requires_grad)
+        zeros.C = wp.zeros_like(self.C, requires_grad=requires_grad)
+        zeros.F_trial = wp.zeros_like(self.F_trial, requires_grad=requires_grad)
+        zeros.F = wp.zeros_like(self.F, requires_grad=requires_grad)
+        zeros.init_F()
+        zeros.stress = wp.zeros_like(self.stress, requires_grad=requires_grad)
+        return zeros
+
+    def empty(self, requires_grad: Optional[bool] = None) -> 'MPMParticleData':
+        empty = MPMParticleData()
+        empty.x = wp.empty_like(self.x, requires_grad=requires_grad)
+        empty.v = wp.empty_like(self.v, requires_grad=requires_grad)
+        empty.C = wp.empty_like(self.C, requires_grad=requires_grad)
+        empty.F_trial = wp.empty_like(self.F_trial, requires_grad=requires_grad)
+        empty.F = wp.empty_like(self.F, requires_grad=requires_grad)
+        # empty.init_F()
+        empty.stress = wp.empty_like(self.stress, requires_grad=requires_grad)
+        return empty
+
 
 @wp.struct
 class MPMGridData(object):
@@ -135,10 +188,24 @@ class MPMGridData(object):
         clone.m = wp.clone(self.m, requires_grad=requires_grad)
         return clone
 
+    def zeros(self, requires_grad: Optional[bool] = None) -> 'MPMGridData':
+        zeros = MPMGridData()
+        zeros.v = wp.zeros_like(self.v, requires_grad=requires_grad)
+        zeros.mv = wp.zeros_like(self.mv, requires_grad=requires_grad)
+        zeros.m = wp.zeros_like(self.m, requires_grad=requires_grad)
+        return zeros
+
+    def empty(self, requires_grad: Optional[bool] = None) -> 'MPMGridData':
+        clone = MPMGridData()
+        clone.v = wp.empty_like(self.v, requires_grad=requires_grad)
+        clone.mv = wp.empty_like(self.mv, requires_grad=requires_grad)
+        clone.m = wp.empty_like(self.m, requires_grad=requires_grad)
+        return clone
 
 @wp.struct
 class MPMConstant(object):
 
+    num_envs: int = 1
     num_grids: int
     dt: float
     bound: int
@@ -146,6 +213,8 @@ class MPMConstant(object):
     dx: float
     inv_dx: float
     eps: float
+    body_friction: float
+    body_softness: float
 
 
 class MPMState(State):
@@ -254,8 +323,10 @@ class MPMModel(Model):
         super().__init__(constant, device)
         self.requires_grad = requires_grad
         self.grid_op = None
+        self.grid_op_name = None
 
-        shape = (self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
+        # TODO: assumes parallel envs are stacked along +x dim only
+        shape = (self.constant.num_envs * self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
         grid = MPMGridData()
         grid.init(shape, device, requires_grad)
         self.grid = grid
@@ -416,6 +487,170 @@ class MPMModel(Model):
 
     @staticmethod
     @wp.kernel
+    def grid_op_dexdeform(
+        constant: MPMConstant,
+        grid: MPMGridData,
+        shape_X_bs: wp.array(dtype=wp.transform),
+        shape_body: wp.array(dtype=int),
+        body_geo: ModelShapeGeometry,
+        num_shapes_per_env: int,
+        body_curr: wp.array(dtype=wp.transform),
+        body_next: wp.array(dtype=wp.transform),
+    ) -> None:
+
+        env_id, ex, py, pz = wp.tid()
+        px = constant.num_grids * env_id + ex  # TODO: assumes parallel envs are stacked along +x dim only
+
+        v = wp.vec3(0.0)
+        if (grid.m[px, py, pz] > constant.eps):
+
+            # normalization
+            v = grid.mv[px, py, pz] * (1.0 / grid.m[px, py, pz])
+
+            # gravity
+            v = v + constant.gravity * constant.dt
+
+            gx = wp.vec3(
+                float(px) * constant.dx,
+                float(py) * constant.dx,
+                float(pz) * constant.dx,
+            )
+
+            shape_start = env_id * num_shapes_per_env
+            shape_end = shape_start + num_shapes_per_env
+
+            # rigid body interaction
+            v = MPMModel._grid_op_dexdeform_body(
+                v,
+                gx,
+                constant,
+                shape_X_bs,
+                shape_body,
+                body_geo,
+                shape_start,
+                shape_end,
+                body_curr,
+                body_next,
+            )
+
+            # boundary condition
+            if ex < constant.bound and v[0] < 0.0:
+                v = wp.vec3(0.0, v[1], v[2])
+            if py < constant.bound and v[1] < 0.0:
+                v = wp.vec3(v[0], 0.0, v[2])
+            if pz < constant.bound and v[2] < 0.0:
+                v = wp.vec3(v[0], v[1], 0.0)
+            if ex > constant.num_grids - constant.bound and v[0] > 0.0:
+                v = wp.vec3(0.0, v[1], v[2])
+            if py > constant.num_grids - constant.bound and v[1] > 0.0:
+                v = wp.vec3(v[0], 0.0, v[2])
+            if pz > constant.num_grids - constant.bound and v[2] > 0.0:
+                v = wp.vec3(v[0], v[1], 0.0)
+
+            # TODO: ground_friction
+
+        grid.v[px, py, pz] = v
+
+    @staticmethod
+    @wp.func
+    def _grid_op_dexdeform_body(
+        v_in: wp.vec3,
+        gx: wp.vec3,
+        constant: MPMConstant,
+        shape_X_bs: wp.array(dtype=wp.transform),
+        shape_body: wp.array(dtype=int),
+        body_geo: ModelShapeGeometry,
+        shape_start: int,
+        shape_end: int,
+        body_curr: wp.array(dtype=wp.transform),
+        body_next: wp.array(dtype=wp.transform),
+    ) -> wp.vec3:
+
+        v = wp.vec3f(v_in)
+        for shape_index in range(shape_start, shape_end):
+            body_index = shape_body[shape_index]
+
+            X_wb = wp.transform_identity()
+            X_wb_next = wp.transform_identity()
+            if body_index >= 0:
+                X_wb = body_curr[body_index]
+                X_wb_next = body_next[body_index]
+
+            X_bs = shape_X_bs[shape_index]
+
+            X_ws = wp.transform_multiply(X_wb, X_bs)
+            X_sw = wp.transform_inverse(X_ws)
+
+            # transform particle position to shape local space
+            x_local = wp.transform_point(X_sw, gx)
+
+            # geo description
+            geo_type = body_geo.type[shape_index]
+            geo_scale = body_geo.scale[shape_index]
+
+            # evaluate shape sdf
+            d = 1.0e6
+            n = wp.vec3()
+
+            if geo_type == wp.sim.GEO_SPHERE:
+                d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
+                n = sphere_sdf_grad(wp.vec3(), geo_scale[0], x_local)
+
+            if geo_type == wp.sim.GEO_BOX:
+                d = box_sdf(geo_scale, x_local)
+                n = box_sdf_grad(geo_scale, x_local)
+
+            if geo_type == wp.sim.GEO_CAPSULE:
+                d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = capsule_sdf_grad(geo_scale[0], geo_scale[1], x_local)
+
+            if geo_type == wp.sim.GEO_CYLINDER:
+                d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = cylinder_sdf_grad(geo_scale[0], geo_scale[1], x_local)
+
+            if geo_type == wp.sim.GEO_CONE:
+                d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = cone_sdf_grad(geo_scale[0], geo_scale[1], x_local)
+
+            # TODO: geo_type == wp.sim.GEO_MESH
+
+            # TODO: geo_type == wp.sim.GEO_SDF
+
+            if geo_type == wp.sim.GEO_PLANE:
+                d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
+                n = wp.vec3(0.0, 1.0, 0.0)
+
+            n = wp.normalize(n)
+
+            # contact point in body local space
+            body_pos = wp.transform_point(X_bs, x_local - n * d)
+
+            # body position in world space
+            bx = wp.transform_point(X_wb, body_pos)
+
+            normal = wp.transform_vector(X_ws, n)
+            dist = wp.dot(normal, gx - bx)
+
+            friction = constant.body_friction
+            softness = constant.body_softness
+            influence = wp.min(wp.exp(-dist * softness), 1.)
+
+            if (influence > 0.1) or (dist <= 0):
+                bv = (wp.transform_point(X_wb_next, wp.transform_point(X_bs, x_local)) - gx) / constant.dt
+                rel_v = v - bv
+
+                normal_component = wp.dot(rel_v, normal)
+                grid_v_t = rel_v - wp.min(normal_component, 0.) * normal
+
+                if (normal_component < 0) and (wp.dot(grid_v_t, grid_v_t) > 1e-30):
+                    # apply friction
+                    grid_v_t_norm = wp.length(grid_v_t)
+                    grid_v_t = grid_v_t * (1. / grid_v_t_norm) * wp.max(0., grid_v_t_norm + normal_component * friction)
+                v = bv + rel_v * (1. - influence) + grid_v_t * influence
+        return v
+
+    @staticmethod
+    @wp.kernel
     def g2p(
             constant: ConstantType,
             statics: StaticsType,
@@ -463,16 +698,33 @@ class MPMModel(Model):
 
         particle_next.v[p] = new_v
         particle_next.C[p] = new_C
-        particle_next.F[p] = (wp.identity(n=3, dtype=float) + constant.dt * new_C) * particle_curr.F[p]
+        particle_next.F_trial[p] = (wp.identity(n=3, dtype=float) + constant.dt * new_C) * particle_curr.F[p]
 
         bound = statics.clip_bound[p] * constant.dx
         new_x = particle_curr.x[p] + constant.dt * new_v
+        # TODO: assumes parallel envs are stacked along +x dim only
         new_x = wp.vec3(
-            wp.clamp(new_x[0], 0.0 + bound, 1.0 - bound),
+            wp.clamp(new_x[0], 0.0 + bound, 1.0 * float(constant.num_envs) - bound),
             wp.clamp(new_x[1], 0.0 + bound, 1.0 - bound),
             wp.clamp(new_x[2], 0.0 + bound, 1.0 - bound),
         )
         particle_next.x[p] = new_x
+
+    @staticmethod
+    @wp.kernel
+    def eval_stress(
+        constant: MPMConstant,
+        statics: MPMStatics,
+        particle: MPMParticleData,
+    ):
+        p = wp.tid()
+
+        m = statics.material_id[p]
+        material = statics.material[m]
+
+        if material.name == materials.MATL_PLASTICINE:
+            particle.F[p] = materials.plasticine_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
 
 
 class MPMModelBuilder(ModelBuilder):
@@ -481,18 +733,22 @@ class MPMModelBuilder(ModelBuilder):
     ConstantType = MPMConstant
     ModelType = MPMModel
 
-    def parse_cfg(self, cfg: config.physics.sim.BaseSimConfig) -> 'MPMModelBuilder':
+    def parse_cfg(self, cfg: config.physics.sim.BaseSimConfig, num_envs: int = 1) -> 'MPMModelBuilder':
 
         num_grids: int = cfg['num_grids']
         dt: float = cfg['dt']
         bound: int = cfg['bound']
         gravity: np.ndarray = np.array(cfg['gravity'], dtype=np.float32)
-        bc: str = cfg['bc']
+        bc: str = cfg['bc']  # boundary condition
         eps: float = cfg['eps']
 
         dx: float = 1 / num_grids
         inv_dx: float = float(num_grids)
 
+        body_friction: float = cfg['body_friction']
+        body_softness: float = cfg['body_softness']
+
+        self.config['num_envs'] = num_envs
         self.config['num_grids'] = num_grids
         self.config['dt'] = dt
         self.config['bound'] = bound
@@ -502,11 +758,15 @@ class MPMModelBuilder(ModelBuilder):
         self.config['bc'] = bc
         self.config['eps'] = eps
 
+        self.config['body_friction'] = body_friction
+        self.config['body_softness'] = body_softness
+
         return self
 
     def build_constant(self) -> ConstantType:
 
         constant = super().build_constant()
+        constant.num_envs = self.config['num_envs']
         constant.num_grids = self.config['num_grids']
         constant.dt = self.config['dt']
         constant.bound = self.config['bound']
@@ -515,14 +775,20 @@ class MPMModelBuilder(ModelBuilder):
         constant.inv_dx = self.config['inv_dx']
         constant.eps = self.config['eps']
 
+        constant.body_friction = self.config['body_friction']
+        constant.body_softness = self.config['body_softness']
+
         return constant
 
     def finalize(self, device: Devicelike = None, requires_grad: bool = False) -> ModelType:
         model = super().finalize(device, requires_grad)
-        if self.config['bc'] == 'freeslip':
+        model.grid_op_name = self.config['bc']
+        if model.grid_op_name == 'freeslip':
             model.grid_op = MPMModel.grid_op_freeslip
-        elif self.config['bc'] == 'noslip':
+        elif model.grid_op_name == 'noslip':
             model.grid_op = MPMModel.grid_op_noslip
+        elif model.grid_op_name == 'dexdeform':
+            model.grid_op = MPMModel.grid_op_dexdeform
         else:
             raise ValueError('invalid boundary condition: {}'.format(self.config['bc']))
         return model
@@ -537,11 +803,15 @@ class MPMInitData(object):
     num_particles: int
     vol: float
 
+    material: materials.MPMMaterial
+
     pos: np.ndarray
     lin_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
     ang_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
     center: np.ndarray = None
     ind_vel: np.ndarray = None
+
+    asset_root = Path(__file__).resolve().parent.parent.parent.parent / 'assets' / 'warp_mpm_sga'
 
     def __post_init__(self) -> None:
         if self.center is None:
@@ -557,6 +827,14 @@ class MPMInitData(object):
                 cfg['shape']['resolution'],
                 cfg['shape']['mode'],
             )
+        elif cfg['shape']['name'].startswith('cylinder'):
+            kwargs = cls.get_cylinder(
+                cfg['shape']['center'],
+                cfg['shape']['size'],
+                cfg['shape']['num_particles'],
+                cfg['shape']['vol'],
+                cfg['shape']['mode'],
+            )
         elif cfg['shape']['type'] == 'mesh':
             kwargs = cls.get_mesh(
                 cfg['shape']['name'],
@@ -568,7 +846,22 @@ class MPMInitData(object):
             )
         else:
             raise ValueError('invalid shape type: {}'.format(cfg['shape']['type']))
-        return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], **kwargs)
+
+        E = cfg['physics'].get('E', None)
+        if 'youngs_modulus_log' in cfg['physics']:
+            E = np.exp(cfg['physics']['youngs_modulus_log'])
+        nu = cfg['physics'].get('nu', None)
+        if 'poissons_ratio' in cfg['physics']:
+            nu = cfg['physics']['poissons_ratio']
+        yield_stress = cfg['physics'].get('yield_stress', None)
+        material = materials.get_material(
+            cfg['physics']['material'],
+            E=E,
+            nu=nu,
+            yield_stress=yield_stress,
+        )
+
+        return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], material=material, **kwargs)
 
     @classmethod
     def get_mesh(
@@ -583,7 +876,7 @@ class MPMInitData(object):
         center = np.array(center)
         size = np.array(size)
 
-        asset_root = Path(__file__).resolve().parent.parent / 'assets'
+        asset_root = cls.asset_root
         precompute_name = f'{name}_{resolution}_{mode}.npz'
 
         if (asset_root / precompute_name).is_file():
@@ -633,7 +926,7 @@ class MPMInitData(object):
             resolution: int,
             mode: str) -> dict[str, Any]:
 
-        asset_root = Path(__file__).resolve().parent.parent / 'assets'
+        asset_root = cls.asset_root
         size_str = '_'.join([str(s) for s in size])
         precompute_name = f'cube_{resolution}_{mode}_{size_str}.npz'
 
@@ -661,6 +954,58 @@ class MPMInitData(object):
         p_x = p_x + center
         p_x = np.ascontiguousarray(p_x.reshape(-1, 3))
         return {'num_particles': p_x.shape[0], 'vol': vol, 'pos': p_x, 'center': center}
+
+    @classmethod
+    def get_cylinder(
+            cls,
+            center: list | np.ndarray,
+            size: list | np.ndarray,
+            num_particles: int,
+            vol: float,
+            mode: str) -> dict[str, Any]:
+
+        asset_root = cls.asset_root
+        size_str = '_'.join([str(s) for s in size])
+        precompute_name = f'cylinder_{num_particles}_{mode}_{size_str}.npz'
+
+        center = np.array(center)
+        size = np.array(size)
+        h, r, _ = size
+
+        if (asset_root / precompute_name).is_file():
+            file = np.load(asset_root / precompute_name)
+            p_x = file['p_x']
+            assert vol == file['vol']
+        else:
+            if mode == 'uniform':
+                raise NotImplementedError
+            elif mode == 'random':
+                rng = np.random.Generator(np.random.PCG64(0))
+
+                sdf_func = shapes.compute_cylinder_sdf(h=h, r=r)
+                sample_func = shapes.box_particles(np.array([r, h, r]))
+
+                p_x = shapes.rejection_sampling(
+                    init_pos=np.array([0., 0., 0.]),
+                    n_particles=num_particles,
+                    sample_func=sample_func,
+                    sdf_func=sdf_func,
+                    rng=rng,
+                )
+            else:
+                raise ValueError('invalid mode: {}'.format(mode))
+
+            # TODO: compute volume if not provided
+
+            np.savez(asset_root / precompute_name, p_x=p_x, vol=vol)
+
+        p_x = p_x + center
+        p_x = np.ascontiguousarray(p_x.reshape(-1, 3))
+        return {'num_particles': p_x.shape[0], 'vol': vol, 'pos': p_x, 'center': center}
+
+    def set_center(self, value: list | np.ndarray) -> None:
+        self.pos = self.pos - self.center + np.array(value)
+        self.center = np.array(value)
 
     def set_lin_vel(self, value: list | np.ndarray) -> None:
         self.lin_vel = np.array(value)
@@ -690,7 +1035,7 @@ class MPMStateInitializer(StateInitializer):
     def add_group(self, group: MPMInitData) -> None:
         self.groups.append(group)
 
-    def finalize(self) -> tuple[StateType, list[int]]:
+    def finalize(self, requires_grad: bool = False) -> tuple[StateType, list[int]]:
 
         pos_groups = []
         vel_groups = []
@@ -713,7 +1058,7 @@ class MPMStateInitializer(StateInitializer):
         pos_groups = np.concatenate(pos_groups, axis=0)
         vel_groups = np.concatenate(vel_groups, axis=0)
 
-        state_0 = super().finalize(shape=pos_groups.shape[0], requires_grad=False)
+        state_0 = super().finalize(shape=pos_groups.shape[0], requires_grad=requires_grad)
 
         state_0.particle.x.assign(pos_groups)
         state_0.particle.v.assign(vel_groups)
@@ -735,21 +1080,27 @@ class MPMStaticsInitializer(StaticsInitializer):
         self.rhos: list[float] = []
         self.clip_bounds: list[float] = []
 
+        self.material_ids: list[int] = []
+        self.materials: list[materials.MPMMaterial] = []
+
     def add_group(self, group: MPMInitData) -> None:
         self.groups.append(group)
 
     def finalize(self) -> StaticsType:
 
-        for group in self.groups:
+        for i, group in enumerate(self.groups):
             self.sections.append(group.num_particles)
 
             self.vols.append(group.vol)
             self.rhos.append(group.rho)
             self.clip_bounds.append(group.clip_bound)
+            self.material_ids.append(i)
+            self.materials.append(group.material)
 
         statics = super().finalize(shape=sum(self.sections))
         statics.update_vol(self.sections, self.vols)
         statics.update_rho(self.sections, self.rhos)
         statics.update_clip_bound(self.sections, self.clip_bounds)
+        statics.update_material(self.sections, self.material_ids, self.materials)
 
         return statics

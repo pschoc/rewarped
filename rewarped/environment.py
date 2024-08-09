@@ -19,6 +19,8 @@ import warp as wp
 import warp.sim
 import warp.sim.render
 
+from .warp_utils import eval_kinematic_fk
+
 
 class RenderMode(Enum):
     NONE = "none"
@@ -33,6 +35,7 @@ class IntegratorType(Enum):
     EULER = "euler"
     FEATHERSTONE = "featherstone"
     XPBD = "xpbd"
+    MPM = "mpm"
 
     def __str__(self):
         return self.value
@@ -103,6 +106,7 @@ class Environment:
     sim_substeps_euler: int = 16
     sim_substeps_featherstone: int = 16
     sim_substeps_xpbd: int = 5
+    sim_substeps_mpm: int = 16
 
     euler_settings = dict(angular_damping=0.05)
     featherstone_settings = dict(angular_damping=0.05, update_mass_matrix_every=sim_substeps_featherstone)
@@ -117,6 +121,7 @@ class Environment:
         angular_damping=0.0,
         enable_restitution=False,
     )
+    mpm_settings = dict()
 
     # stiffness and damping for joint attachment dynamics used by Euler
     joint_attach_ke: float = 32000.0
@@ -128,6 +133,8 @@ class Environment:
 
     # whether to apply model.joint_q, joint_qd to bodies before simulating
     eval_fk: bool = True
+    # whether to set state.body_q based on state.joint_q
+    kinematic_fk: bool = False
     # whether to update state.joint_q, state.joint_qd
     eval_ik: bool = False
 
@@ -306,6 +313,9 @@ class Environment:
         elif self.integrator_type == IntegratorType.XPBD:
             sim_substeps = self.sim_substeps_xpbd
             integrator = wp.sim.XPBDIntegrator(**self.xpbd_settings)
+        elif self.integrator_type == IntegratorType.MPM:
+            sim_substeps = self.sim_substeps_mpm
+            integrator = wp.sim.MPMIntegrator(model, **self.mpm_settings)
         else:
             raise NotImplementedError(self.integrator_type)
         return sim_substeps, integrator
@@ -363,6 +373,9 @@ class Environment:
     def update(self):
         control = self.control_0
         for i in range(self.sim_substeps):
+            if self.kinematic_fk:
+                eval_kinematic_fk(self.model, self.state_0, self.state_1, self.sim_dt, self.sim_substeps, control)
+
             self.state_0.clear_forces()
             wp.sim.collide(self.model, self.state_0)
             self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt, control=control)
