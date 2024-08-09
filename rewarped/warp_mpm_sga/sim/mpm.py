@@ -69,6 +69,7 @@ class MPMParticleData(object):
     C: wp.array(dtype=wp.mat33)
     stress: wp.array(dtype=wp.mat33)
 
+    F_trial: wp.array(dtype=wp.mat33)
     F: wp.array(dtype=wp.mat33)
 
     @staticmethod
@@ -78,15 +79,16 @@ class MPMParticleData(object):
         F[p] = wp.identity(n=3, dtype=float)
 
     def init_F(self) -> None:
+        wp.launch(self.init_F_kernel, dim=self.F_trial.shape, inputs=[self.F_trial], device=self.F_trial.device)
         wp.launch(self.init_F_kernel, dim=self.F.shape, inputs=[self.F], device=self.F.device)
 
     def init(self, shape: ShapeLike, device: Devicelike = None, requires_grad: bool = False) -> None:
-
         self.x = wp.zeros(shape=shape, dtype=wp.vec3, device=device, requires_grad=requires_grad)
         self.v = wp.zeros(shape=shape, dtype=wp.vec3, device=device, requires_grad=requires_grad)
         self.C = wp.zeros(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
         self.stress = wp.zeros(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
 
+        self.F_trial = wp.empty(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
         self.F = wp.empty(shape=shape, dtype=wp.mat33, device=device, requires_grad=requires_grad)
         self.init_F()
 
@@ -105,6 +107,8 @@ class MPMParticleData(object):
             self.v.grad.zero_()
         if self.C.requires_grad:
             self.C.grad.zero_()
+        if self.F_trial.requires_grad:
+            self.F_trial.grad.zero_()
         if self.F.requires_grad:
             self.F.grad.zero_()
         if self.stress.requires_grad:
@@ -115,6 +119,7 @@ class MPMParticleData(object):
         clone.x = wp.clone(self.x, requires_grad=requires_grad)
         clone.v = wp.clone(self.v, requires_grad=requires_grad)
         clone.C = wp.clone(self.C, requires_grad=requires_grad)
+        clone.F_trial = wp.clone(self.F_trial, requires_grad=requires_grad)
         clone.F = wp.clone(self.F, requires_grad=requires_grad)
         clone.stress = wp.clone(self.stress, requires_grad=requires_grad)
         return clone
@@ -124,6 +129,7 @@ class MPMParticleData(object):
         zeros.x = wp.zeros_like(self.x, requires_grad=requires_grad)
         zeros.v = wp.zeros_like(self.v, requires_grad=requires_grad)
         zeros.C = wp.zeros_like(self.C, requires_grad=requires_grad)
+        zeros.F_trial = wp.zeros_like(self.F_trial, requires_grad=requires_grad)
         zeros.F = wp.zeros_like(self.F, requires_grad=requires_grad)
         zeros.init_F()
         zeros.stress = wp.zeros_like(self.stress, requires_grad=requires_grad)
@@ -134,6 +140,7 @@ class MPMParticleData(object):
         empty.x = wp.empty_like(self.x, requires_grad=requires_grad)
         empty.v = wp.empty_like(self.v, requires_grad=requires_grad)
         empty.C = wp.empty_like(self.C, requires_grad=requires_grad)
+        empty.F_trial = wp.empty_like(self.F_trial, requires_grad=requires_grad)
         empty.F = wp.empty_like(self.F, requires_grad=requires_grad)
         # empty.init_F()
         empty.stress = wp.empty_like(self.stress, requires_grad=requires_grad)
@@ -515,7 +522,7 @@ class MPMModel(Model):
 
         particle_next.v[p] = new_v
         particle_next.C[p] = new_C
-        particle_next.F[p] = (wp.identity(n=3, dtype=float) + constant.dt * new_C) * particle_curr.F[p]
+        particle_next.F_trial[p] = (wp.identity(n=3, dtype=float) + constant.dt * new_C) * particle_curr.F[p]
 
         bound = statics.clip_bound[p] * constant.dx
         new_x = particle_curr.x[p] + constant.dt * new_v
@@ -525,6 +532,22 @@ class MPMModel(Model):
             wp.clamp(new_x[2], 0.0 + bound, 1.0 - bound),
         )
         particle_next.x[p] = new_x
+
+    @staticmethod
+    @wp.kernel
+    def eval_stress(
+        constant: MPMConstant,
+        statics: MPMStatics,
+        particle: MPMParticleData,
+    ):
+        p = wp.tid()
+
+        m = statics.material_id[p]
+        material = statics.material[m]
+
+        if material.name == materials.MATL_PLASTICINE:
+            particle.F[p] = materials.plasticine_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
 
 
 class MPMModelBuilder(ModelBuilder):
