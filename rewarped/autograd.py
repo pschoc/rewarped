@@ -2,31 +2,7 @@ import torch
 
 import warp as wp
 
-from .warp_utils import eval_kinematic_fk
-
-
-def update(update_params, sim_params, states, control):
-    tape, integrator, model, use_graph_capture, synchronize = update_params
-    sim_substeps, sim_dt, kinematic_fk, eval_ik = sim_params
-    state_in, states_mid, state_out = states
-
-    state_0 = state_in
-    for i in range(sim_substeps):
-        if i == sim_substeps - 1:
-            state_1 = state_out
-        else:
-            state_1 = states_mid[i] if states_mid is not None else model.state(copy="zeros")
-
-        if kinematic_fk:
-            eval_kinematic_fk(model, state_0, state_1, sim_dt, sim_substeps, control)
-
-        state_0.clear_forces()
-        wp.sim.collide(model, state_0)
-        integrator.simulate(model, state_0, state_1, sim_dt, control=control)
-        state_0 = state_1
-
-    if eval_ik:
-        wp.sim.eval_ik(model, state_out, state_out.joint_q, state_out.joint_qd)
+from .warp_utils import sim_update
 
 
 # for checkpointing method
@@ -114,7 +90,7 @@ class UpdateFunction(torch.autograd.Function):
                     wp.capture_begin(force_module_load=False)
                     try:
                         with tape:
-                            update(update_params, sim_params, states_bwd, control_bwd)
+                            sim_update(update_params, sim_params, states_bwd, control_bwd)
                     finally:
                         integrator.update_graph = wp.capture_end()
 
@@ -130,7 +106,7 @@ class UpdateFunction(torch.autograd.Function):
             assign_tensors(state_out_bwd, state_out, [], [])  # write to state_out
         else:
             with tape:
-                update(update_params, sim_params, states, control)
+                sim_update(update_params, sim_params, states, control)
 
             # tape.visualize(filename="tape.dot")
             # exit()

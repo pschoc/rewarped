@@ -78,18 +78,19 @@ class WarpEnv(Environment):
     WarpEnv.step() ->
       WarpEnv.pre_physics_step()  # assign actions to self.control
       WarpEnv.do_physics_step() ->
-        if (requires_grad):
-          UpdateFunction.apply() ->
-            Integrator.simulate()
+        if (requires_grad) or (use_graph_capture):
+          UpdateFunction() ->
+            sim_update() ->
+              Integrator.simulate()
         else:
-          Environment.update() ->
+          Environment.update() ->  # should behave like sim_update()
             Integrator.simulate()
 
       WarpEnv.compute_observations()
       WarpEnv.compute_reward()
 
       if (env_ids):
-        WarpEnv.reset()
+        WarpEnv.reset(env_idx)
       WarpEnv.render()
     ```
     """
@@ -257,12 +258,19 @@ class WarpEnv(Environment):
             wp.sim.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, None, self.state_0)
 
         self.tape = None
-        if self.requires_grad:
-            assert self.model.requires_grad
-            if self.use_graph_capture:
-                self.tape = wp.Tape()
+        if self.requires_grad or self.use_graph_capture:
+            if self.requires_grad:
+                assert self.model.requires_grad
 
-                self.states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
+                self.state_tensors = [wp.to_torch(getattr(self.state_0, name)) for name in self.state_tensors_names]
+                self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
+            else:
+                self.state_tensors_names, self.control_tensors_names = [], []
+                self.state_tensors = []
+                self.control_tensors = []
+
+            if self.use_graph_capture:
+                self.tape = wp.Tape()  # persistent tape for graph capture
 
                 self.state_0_bwd = self.model.state(copy="zeros")
                 self.state_1_bwd = self.model.state(copy="zeros")
@@ -270,22 +278,13 @@ class WarpEnv(Environment):
                 self.control_0_bwd = self.model.control()
 
                 # graph capture done inside first call to UpdateFunction.apply()
-                self.tape.update_graph = None
-                self.tape.bwd_update_graph = None
-            else:
-                self.states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
-            self.state_tensors = [wp.to_torch(getattr(self.state_0, name)) for name in self.state_tensors_names]
-            self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
+                self.integrator.update_graph = None
+                self.integrator.bwd_update_graph = None
         else:
-            if self.use_graph_capture:
-                with wp.ScopedCapture() as capture:
-                    self.update()
-                self.update_graph = capture.graph
-            else:
-                self.update_graph = None
+            self.integrator.update_graph = None
             self.state_tensors = None
             self.control_tensors = None
-        print(f"Warp graph capture: {self.use_graph_capture}, synchronize: {self.synchronize}")
+        print(f"grads: {self.requires_grad}, graph_capture: {self.use_graph_capture}, synchronize: {self.synchronize}")
 
     def initialize_trajectory(self):
         """
@@ -353,15 +352,16 @@ class WarpEnv(Environment):
         return self.obs_buf
 
     def do_physics_step(self):
-        if self.requires_grad:
+        if self.requires_grad or self.use_graph_capture:
             tape = self.tape
             update_params = (tape, self.integrator, self.model, self.use_graph_capture, self.synchronize)
             sim_params = (self.sim_substeps, self.sim_dt, self.kinematic_fk, self.eval_ik)
 
-            state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known
-
             if self.use_graph_capture:
+                state_1 = self.state_1
+
                 assert tape is not None
+
                 states_mid = self.states_mid
 
                 states = (self.state_0, states_mid, state_1)
@@ -370,6 +370,8 @@ class WarpEnv(Environment):
                 states_bwd = (self.state_0_bwd, self.states_mid_bwd, self.state_1_bwd)
                 control_bwd = self.control_0_bwd
             else:
+                state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known
+
                 # states_mid = None
                 states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
 
@@ -379,19 +381,34 @@ class WarpEnv(Environment):
                 states_bwd = (None, None, None)
                 control_bwd = None
 
-            tensors = tuple(self.state_tensors + self.control_tensors)
-
-            outputs = UpdateFunction.apply(
-                update_params,
-                sim_params,
-                states,
-                control,
-                states_bwd,
-                control_bwd,
-                self.state_tensors_names,
-                self.control_tensors_names,
-                *tensors,
-            )
+            if self.requires_grad:
+                tensors = tuple(self.state_tensors + self.control_tensors)
+                outputs = UpdateFunction.apply(
+                    update_params,
+                    sim_params,
+                    states,
+                    control,
+                    states_bwd,
+                    control_bwd,
+                    self.state_tensors_names,
+                    self.control_tensors_names,
+                    *tensors,
+                )
+            else:
+                ctx = lambda: None
+                state_tensors_names, control_tensors_names = [], []
+                outputs = UpdateFunction.forward(
+                    ctx,
+                    update_params,
+                    sim_params,
+                    states,
+                    control,
+                    states_bwd,
+                    control_bwd,
+                    state_tensors_names,
+                    control_tensors_names,
+                )
+                outputs = []
 
             num_state = len(self.state_tensors_names)
             self.state_tensors = list(outputs[:num_state])
@@ -401,10 +418,7 @@ class WarpEnv(Environment):
             self.control_0 = self.model.control()
             self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
         else:
-            if self.use_graph_capture:
-                wp.capture_launch(self.update_graph)
-            else:
-                self.update()
+            super().update()
         self.sim_time += self.frame_dt
 
     def step(self, actions):
