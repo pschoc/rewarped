@@ -8,14 +8,13 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import warp as wp
-
-from .articulation import (
+from warp.sim.articulation import (
     compute_2d_rotational_dofs,
     compute_3d_rotational_dofs,
     eval_fk,
 )
-from .integrator import Integrator
-from .integrator_euler import (
+from warp.sim.integrator import Integrator
+from warp.sim.integrator_euler import (
     eval_bending_forces,
     eval_joint_force,
     eval_muscle_forces,
@@ -28,7 +27,7 @@ from .integrator_euler import (
     eval_triangle_contact_forces,
     eval_triangle_forces,
 )
-from .model import Control, Model, State
+from warp.sim.model import Control, Model, State
 
 
 # Frank & Park definition 3.20, pg 100

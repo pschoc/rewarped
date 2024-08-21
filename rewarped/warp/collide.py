@@ -12,8 +12,7 @@ Collision handling functions and kernels.
 """
 
 import warp as wp
-
-from .model import PARTICLE_FLAG_ACTIVE, ModelShapeGeometry
+from warp.sim.model import PARTICLE_FLAG_ACTIVE, ModelShapeGeometry
 
 
 @wp.func
