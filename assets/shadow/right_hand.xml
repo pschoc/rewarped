@@ -55,7 +55,8 @@
 
   <worldbody>
     <light name="light0" pos="0 1 4" dir="0 0 -1" directional="true" castshadow="false" ambient="0.2 0.2 0.2" diffuse="0.8 0.8 0.8"/>
-    <body name="hand mount" pos="1 1.25 0.15" euler="1.5708 0 3.14159">
+    <!-- <body name="hand mount" pos="1 1.25 0.15" euler="1.5708 0 3.14159"> -->
+    <body name="hand mount" pos="0 0 -0.256">
       <inertial pos="0 0 0" mass="0.1" diaginertia="0.001 0.001 0.001"/>
       <body name="forearm" childclass="asset_class" pos="0 0.01 0">
         <inertial pos="0.001 -0.002 0.29" quat="0.982037 -0.0160006 0 -0.188007" mass="4" diaginertia="0.01 0.01 0.0075"/>
@@ -181,7 +182,7 @@
             <body name="thbase" pos="0.034 -0.009 0.029" quat="0.923956 0 0.382499 0">
               <inertial pos="0 0 0" mass="0.01" diaginertia="1e-05 1e-05 1e-05"/>
               <joint name="THJ4" pos="0 0 0" axis="0 0 -1" range="-1.047 1.047" user="1121"/>
-              <geom name="V_thbase" size="0.001 0.001 0.001" type="box" group="1"/>
+              <!-- <geom name="V_thbase" size="0.001 0.001 0.001" type="box" group="1"/> -->
               <body name="thproximal">
                 <inertial pos="0 0 0.017" quat="0.981604 0 0.000999597 0.190923" mass="0.016" diaginertia="1e-05 1e-05 1e-05"/>
                 <joint name="THJ3" pos="0 0 0" axis="1 0 0" range="0 1.222" user="1120"/>
@@ -190,7 +191,7 @@
                 <body name="thhub" pos="0 0 0.038">
                   <inertial pos="0 0 0" mass="0.002" diaginertia="1e-05 1e-05 1e-05"/>
                   <joint name="THJ2" pos="0 0 0" axis="1 0 0" range="-0.209 0.209" user="1119"/>
-                  <geom name="V_thhub" size="0.001 0.001 0.001" type="box" group="1"/>
+                  <!-- <geom name="V_thhub" size="0.001 0.001 0.001" type="box" group="1"/> -->
                   <body name="thmiddle">
                     <inertial pos="0 0 0.016" quat="0.999971 -0.000999971 -0.00699979 0.00299991" mass="0.016" diaginertia="1e-05 1e-05 1e-05"/>
                     <joint name="THJ1" pos="0 0 0" axis="0 1 0" range="-0.524 0.524" user="1118"/>
