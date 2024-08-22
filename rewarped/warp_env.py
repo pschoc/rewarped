@@ -262,8 +262,8 @@ class WarpEnv(Environment):
             if self.requires_grad:
                 assert self.model.requires_grad
 
-                self.state_tensors = [wp.to_torch(getattr(self.state_0, name)) for name in self.state_tensors_names]
-                self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
+                self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
+                self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
             else:
                 self.state_tensors_names, self.control_tensors_names = [], []
                 self.state_tensors = []
@@ -357,29 +357,26 @@ class WarpEnv(Environment):
             update_params = (tape, self.integrator, self.model, self.use_graph_capture, self.synchronize)
             sim_params = (self.sim_substeps, self.sim_dt, self.kinematic_fk, self.eval_ik)
 
-            if self.use_graph_capture:
+            if self.requires_grad:
+                state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known
+            else:
                 state_1 = self.state_1
 
-                assert tape is not None
-
+            if self.use_graph_capture:
                 states_mid = self.states_mid
 
-                states = (self.state_0, states_mid, state_1)
-                control = self.control_0
-
+                assert tape is not None
                 states_bwd = (self.state_0_bwd, self.states_mid_bwd, self.state_1_bwd)
                 control_bwd = self.control_0_bwd
             else:
-                state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known
-
-                # states_mid = None
+                # states_mid = self.states_mid
                 states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
-
-                states = (self.state_0, states_mid, state_1)
-                control = self.control_0
 
                 states_bwd = (None, None, None)
                 control_bwd = None
+
+            states = (self.state_0, states_mid, state_1)
+            control = self.control_0
 
             if self.requires_grad:
                 tensors = tuple(self.state_tensors + self.control_tensors)
@@ -395,7 +392,7 @@ class WarpEnv(Environment):
                     *tensors,
                 )
             else:
-                ctx = lambda: None
+                ctx = torch.autograd.function.FunctionCtx()
                 state_tensors_names, control_tensors_names = [], []
                 outputs = UpdateFunction.forward(
                     ctx,
@@ -416,15 +413,15 @@ class WarpEnv(Environment):
             self.state_0 = state_1
 
             self.control_0 = self.model.control()
-            self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
+            self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
         else:
             super().update()
-        self.sim_time += self.frame_dt
 
     def step(self, actions):
         with wp.ScopedTimer("simulate", active=False, detailed=False):
             self.pre_physics_step(actions)
             self.do_physics_step()
+            self.sim_time += self.frame_dt
 
         self.progress_buf += 1
         self.num_frames += 1
@@ -474,8 +471,8 @@ class WarpEnv(Environment):
             wp.sim.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, mask, self.state_0)
             # TODO: wrap this in torch.autograd.Function?
 
-        self.state_tensors = [wp.to_torch(getattr(self.state_0, name)) for name in self.state_tensors_names]
-        self.control_tensors = [wp.to_torch(getattr(self.control_0, name)) for name in self.control_tensors_names]
+        self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
+        self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
 
     def randomize_init(self, env_ids):
         raise NotImplementedError
