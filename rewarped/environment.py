@@ -718,7 +718,7 @@ def run_env(Demo, **kwargs):
 
         # dump times
         for i in range(len(env_times)):
-            print(f"envs: {env_size[i]} steps/second: {env_times[i]}")
+            print(f"envs: {env_size[i]} | steps/second: {env_times[i]}")
 
         # plot
         plt.figure(1)
@@ -731,7 +731,7 @@ def run_env(Demo, **kwargs):
     else:
         try:
             steps_per_second = demo.run()
-            print(f"envs: {demo.num_envs} steps/second: {steps_per_second}")
+            print(f"envs: {demo.num_envs} | steps/second: {steps_per_second}")
         except KeyboardInterrupt:
             if demo.renderer is not None:
                 demo.renderer.save()

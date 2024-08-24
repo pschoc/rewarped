@@ -330,7 +330,7 @@ class WarpEnv(Environment):
             checkpoint["control"][k] = v.clone()
         return checkpoint
 
-    def reset(self, env_ids=None):
+    def reset(self, env_ids=None, clear_grad=None):
         if not self.initialized:
             self.init()
             self.initialized = True
@@ -341,12 +341,32 @@ class WarpEnv(Environment):
         self.reset_idx(env_ids)
 
         # clear action
-        self.actions = self.actions.clone()
-        self.actions[env_ids, :] = torch.zeros((len(env_ids), self.num_actions), dtype=torch.float, device=self.device)
+        N = len(env_ids)
+        if N == self.num_envs:
+            self.actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float, device=self.device)
+        else:
+            if self.requires_grad and clear_grad is False:
+                new_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float, device=self.device)
+                new_actions.requires_grad_()
+                mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+                mask[env_ids] = 0  # mask == True if not reset
+                other_env_ids = torch.where(mask)[0]
+                if len(other_env_ids) > 0:
+                    indices = other_env_ids.unsqueeze(1).expand(-1, self.num_actions)
+                    new_actions.scatter(0, indices, self.actions)
+                self.actions = new_actions
+            else:
+                self.actions = self.actions.detach().clone()
+                self.actions[env_ids, :] = torch.zeros((N, self.num_actions), dtype=torch.float, device=self.device)
 
         self.progress_buf[env_ids] = 0
         self.num_frames = 0
 
+        self.integrator._step = 0
+
+        # initialize_trajectory()
+        if self.requires_grad and clear_grad:
+            self.clear_grad()
         self.compute_observations()
 
         return self.obs_buf
@@ -447,6 +467,7 @@ class WarpEnv(Environment):
             with wp.ScopedTimer("reset", active=False, detailed=False):
                 self.reset(env_ids)
 
+        # NOTE: this occurs post reset, so will render initial state (not terminal state)
         with wp.ScopedTimer("render", active=False, detailed=False):
             self.render()
 
@@ -460,8 +481,6 @@ class WarpEnv(Environment):
         self.control_0 = self.model.control()
         self.state_0.clear_forces()
         self.control_0.clear_acts()
-
-        self.integrator._step = 0
 
         if self.randomize:
             self.randomize_init(env_ids)
