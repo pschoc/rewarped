@@ -11,6 +11,7 @@ from ...environment import IntegratorType, run_env
 from ...mpm_warp_env_mixin import MPMWarpEnvMixin
 from ...warp_env import WarpEnv
 from .utils.interface import DEFAULT_INITIAL_QPOS
+from .utils.io import load_demo
 
 TASK_LENGTHS = {
     # "folding": 250,
@@ -302,6 +303,28 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                 self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
 
                 self.renderer.end_frame()
+
+    def get_demo_actions(self, demo_file):
+        demo = load_demo(demo_file)
+        demo_traj = []
+        for t in range(len(demo["states"]) - 1):
+            state = demo["states"][t]
+            next_state = demo["states"][t + 1]
+            # action = demo["actions"][t]  # joint velocities
+            action = (next_state[24][0] - state[24][0]) / self.action_scale
+            action = action[None, ...].repeat(self.num_envs, axis=0)
+            action = torch.tensor(action, device=self.device, requires_grad=True)
+            demo_traj.append(action)
+        if len(demo_traj) != self.episode_length:
+            print(f"Demo {demo_file} has length {len(demo_traj)}")
+            if len(demo_traj) > self.episode_length:
+                demo_traj = demo_traj[: self.episode_length]
+            elif len(demo_traj) < self.episode_length:
+                for t in range(len(demo["states"]) - 1, self.episode_length):
+                    action = torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=True)
+                    demo_traj.append(action)
+            assert len(demo_traj) == self.episode_length
+        return demo_traj
 
 
 if __name__ == "__main__":
