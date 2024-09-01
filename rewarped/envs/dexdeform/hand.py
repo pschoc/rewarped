@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import torch
 from omegaconf import OmegaConf
 
@@ -71,11 +72,54 @@ class Hand(WarpEnv):
         builder.rigid_contact_margin = 0.05
         return builder
 
-    # def create_env(self, builder):
-    #     self.create_articulation(builder)
+    def create_env(self, builder):
+        mode = self.dexdeform_cfg.SIMULATOR.mode
+        if mode == "dual":
+            raise NotImplementedError
 
-    def create_articulation(self, builder):
-        raise NotImplementedError
+        for hand_cfg in self.dexdeform_cfg.MANIPULATORS:
+            scale = self.dexdeform_cfg.SIMULATOR.scale
+            fixed_base = self.dexdeform_cfg.SIMULATOR.get("fixed_base", False)
+            self.create_hand(builder, mode, hand_cfg, scale, fixed_base)
+
+    def create_hand(self, builder, mode, hand_cfg, scale, fixed_base):
+        init_pos, init_rot, init_qpos = hand_cfg.init_pos, hand_cfg.init_rot, hand_cfg.init_qpos
+        init_rot[0] += -np.pi / 2
+        if mode == "lh":
+            asset_file = "left_hand.xml"
+        elif mode == "rh":
+            asset_file = "right_hand.xml"
+        else:
+            raise ValueError
+
+        xform = wp.transform(init_pos, wp.quat_rpy(*init_rot))
+        wp.sim.parse_mjcf(
+            os.path.join(self.asset_dir, f"shadow/{asset_file}"),
+            builder,
+            xform=xform,
+            floating=not fixed_base,
+            stiffness=1000.0,
+            damping=0.0,
+            # parse_meshes=False,
+            # ignore_names=["C_forearm"],
+            visual_classes=["D_Vizual"],
+            collider_classes=["DC_Hand"],
+            enable_self_collisions=False,
+            scale=scale,
+            reduce_capsule_height_by_radius=True,
+            collapse_fixed_joints=True,
+            # force_show_colliders=True,
+            # hide_visuals=True,
+        )
+
+        if init_qpos == "default":
+            for i, joint_name in enumerate(builder.joint_name):
+                builder.joint_q[i] = DEFAULT_INITIAL_QPOS[f"robot0:{joint_name}"]
+        elif init_qpos == "zero":
+            for i, joint_name in enumerate(builder.joint_name):
+                builder.joint_q[i] = 0.0
+        else:
+            raise ValueError
 
     def init_sim(self):
         super().init_sim()
