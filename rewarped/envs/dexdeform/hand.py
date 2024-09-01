@@ -7,6 +7,7 @@ from omegaconf import OmegaConf
 import warp as wp
 
 from ...environment import IntegratorType, run_env
+from ...mpm_warp_env_mixin import MPMWarpEnvMixin
 from ...warp_env import WarpEnv
 from .utils.interface import DEFAULT_INITIAL_QPOS
 
@@ -21,32 +22,32 @@ TASK_LENGTHS = {
 }
 
 
-class Hand(WarpEnv):
+class Hand(MPMWarpEnvMixin, WarpEnv):
     sim_name = "Hand" + "DexDeform"
-    env_offset = (5.0, 5.0, 0.0)
+    env_offset = (1.0, 0.0, 0.0)
+    env_offset_correction = False
 
     eval_fk = True
+    kinematic_fk = True
     eval_ik = False
 
-    # integrator_type = IntegratorType.EULER
-    # sim_substeps_euler = 16
-    # euler_settings = dict(angular_damping=0.0)
+    integrator_type = IntegratorType.MPM
+    sim_substeps_mpm = 40
 
-    integrator_type = IntegratorType.FEATHERSTONE
-    sim_substeps_featherstone = 16
-    featherstone_settings = dict(angular_damping=0.0, update_mass_matrix_every=sim_substeps_featherstone)
-
-    up_axis = "Z"
+    up_axis = "Y"
     ground_plane = True
 
-    state_tensors_names = ("joint_q", "joint_qd")
+    state_tensors_names = ("joint_q", "body_q") + ("mpm_x", "mpm_v", "mpm_C", "mpm_F_trial", "mpm_F", "mpm_stress")
     control_tensors_names = ("joint_act",)
 
-    def __init__(self, num_envs=8, episode_length=1000, early_termination=True, **kwargs):
+    def __init__(self, task_name="flip", num_envs=2, episode_length=300, early_termination=False, **kwargs):
         num_obs = 0
-        num_act = 0
+        num_act = 24
+        if episode_length == -1:
+            episode_length = TASK_LENGTHS[task_name]
         super().__init__(num_envs, num_obs, num_act, episode_length, early_termination, **kwargs)
 
+        self.task_name = task_name
         self.action_scale = 1.0
 
         self.dexdeform_cfg = self.create_cfg_dexdeform()
@@ -70,6 +71,11 @@ class Hand(WarpEnv):
     def create_modelbuilder(self):
         builder = super().create_modelbuilder()
         builder.rigid_contact_margin = 0.05
+        return builder
+
+    def create_builder(self):
+        builder = super().create_builder()
+        self.create_builder_mpm(builder)
         return builder
 
     def create_env(self, builder):
@@ -121,7 +127,41 @@ class Hand(WarpEnv):
         else:
             raise ValueError
 
+    def create_cfg_mpm(self, mpm_cfg):
+        mpm_cfg.update(["--physics.sim", "dexdeform"])
+        mpm_cfg.update(["--physics.env", "dexdeform"])
+
+        # mpm_cfg.update(["--physics.sim.gravity", str(tuple(self.dexdeform_cfg.SIMULATOR.gravity))])
+        mpm_cfg.update(["--physics.sim.body_friction", str(self.dexdeform_cfg.SIMULATOR.hand_friction)])
+
+        if self.task_name == "lift":
+            shape_cfg = self.dexdeform_cfg.SHAPES[0]
+            init_pos, width = shape_cfg.init_pos, shape_cfg.width
+            mpm_cfg.update(["--physics.env.shape", "cube"])
+            mpm_cfg.update(["--physics.env.shape.center", str(tuple(init_pos))])
+            mpm_cfg.update(["--physics.env.shape.size", str(tuple(width))])
+            mpm_cfg.update(["--physics.env.shape.resolution", str(20)])
+            # TODO: change resolution based on num_particles
+        elif self.task_name == "flip":
+            mpm_cfg.update(["--physics.env.shape", "cylinder_dexdeform"])
+            # mpm_cfg.update(["--physics.env.shape.num_particles", str(self.dexdeform_cfg.SIMULATOR.n_particles)])
+
+            # lowering to decrease memory requirements for parallel envs
+            mpm_cfg.update(["--physics.sim.num_grids", str(48)])
+            mpm_cfg.update(["--physics.env.shape.num_particles", str(2500)])
+        else:
+            raise NotImplementedError
+
+        print(mpm_cfg)
+        return mpm_cfg
+
+    def create_model(self):
+        model = super().create_model()
+        self.create_model_mpm(model)
+        return model
+
     def init_sim(self):
+        self.init_sim_mpm()
         super().init_sim()
         # self.print_model_info()
 
@@ -143,6 +183,12 @@ class Hand(WarpEnv):
         actions = torch.clip(actions, -1.0, 1.0)
         self.actions = actions
         acts = self.action_scale * actions
+
+        if self.kinematic_fk:
+            # ensure joint limit
+            joint_q = self.state.joint_q.clone().view(self.num_envs, -1)
+            joint_q = joint_q.detach()
+            acts = torch.clip(acts, self.joint_limit_lower - joint_q, self.joint_limit_upper - joint_q)
 
         if self.joint_act_indices is ...:
             self.control.assign("joint_act", acts.flatten())
