@@ -43,7 +43,10 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
     state_tensors_names = ("joint_q", "body_q") + ("mpm_x", "mpm_v", "mpm_C", "mpm_F_trial", "mpm_F", "mpm_stress")
     control_tensors_names = ("joint_act",)
 
-    def __init__(self, task_name="flip", num_envs=2, episode_length=300, early_termination=False, **kwargs):
+    TRAJ_OPT = True
+    LOAD_DEMO = False
+
+    def __init__(self, task_name="flip", num_envs=2, episode_length=-1, early_termination=False, **kwargs):
         num_obs = 0
         num_act = 24
         if episode_length == -1:
@@ -331,10 +334,7 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         self.init()
         self.initialized = True
 
-        TRAJ_OPT = True
-        LOAD_DEMO = False
-
-        if LOAD_DEMO:
+        if self.LOAD_DEMO:
             # load actions from DexDeform teleop demos
             demo_dir = os.path.join(self.asset_dir, "../data/DexDeform/demos")
             demo_files = sorted(glob(os.path.join(demo_dir, f"{self.task_name}/*.pkl")))
@@ -369,7 +369,7 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                     dones.append(done)
                     infos.append(info)
 
-                if TRAJ_OPT:
+                if self.TRAJ_OPT:
                     actions = torch.stack(actions)
                     rewards = torch.stack(rewards)
 
