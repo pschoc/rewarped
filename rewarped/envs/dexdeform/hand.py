@@ -215,6 +215,26 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
         self.rew_buf, self.reset_buf, self.terminated_buf, self.truncated_buf = rew, reset, terminated, truncated
 
+    def render(self, state=None):
+        if self.renderer is not None:
+            with wp.ScopedTimer("render", False):
+                self.render_time += self.frame_dt
+                self.renderer.begin_frame(self.render_time)
+                # render state 1 (swapped with state 0 just before)
+                self.renderer.render(state or self.state_1)
+
+                # render mpm particles
+                particle_q = self.state.mpm_x
+                if isinstance(particle_q, torch.Tensor):
+                    particle_q = particle_q.detach().cpu().numpy()
+                else:
+                    particle_q = particle_q.numpy()
+                particle_radius = 7.5e-3
+                particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
+                self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
+
+                self.renderer.end_frame()
+
 
 if __name__ == "__main__":
     run_env(Hand)
