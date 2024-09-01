@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import torch
+from gym import spaces
 from omegaconf import OmegaConf
 
 import warp as wp
@@ -48,10 +49,21 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         super().__init__(num_envs, num_obs, num_act, episode_length, early_termination, **kwargs)
 
         self.task_name = task_name
-        self.action_scale = 1.0
+        self.action_scale = (0.33 * 0.002) * self.sim_substeps_mpm
+        self.downsample_particle = 250
 
         self.dexdeform_cfg = self.create_cfg_dexdeform()
         print(self.dexdeform_cfg)
+
+    @property
+    def observation_space(self):
+        d = {
+            "particle_q": spaces.Box(low=-np.inf, high=np.inf, shape=(self.downsample_particle, 3), dtype=np.float32),
+            "com_q": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+            "joint_q": spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_act,), dtype=np.float32),
+        }
+        d = spaces.Dict(d)
+        return d
 
     def create_cfg_dexdeform(self):
         cfg_file = os.path.join(os.path.dirname(__file__), f"env_cfgs/{self.task_name}.yml")
@@ -169,14 +181,36 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             self.joint_act = wp.to_torch(self.model.joint_act).view(self.num_envs, -1).clone()
             self.joint_act_indices = ...
 
+            self.joint_limit_lower = wp.to_torch(self.model.joint_limit_lower).view(self.num_envs, -1).clone()
+            self.joint_limit_upper = wp.to_torch(self.model.joint_limit_upper).view(self.num_envs, -1).clone()
+
+            self.init_dist = torch.ones(self.num_envs, device=self.device, dtype=torch.float)
+
+            if self.task_name == "lift":
+                pass
+            elif self.task_name == "flip":
+                cylinder_indices = torch.arange(0, self.downsample_particle, device=self.device)
+                N = self.downsample_particle // 2
+                self.half0_indices, self.half1_indices = cylinder_indices[:N], cylinder_indices[N:]
+                self.half1_indices = torch.flip(self.half1_indices, [0])
+
     def reset_idx(self, env_ids):
         if self.early_termination:
             raise NotImplementedError
         else:
             super().reset_idx(env_ids)
+            self.init_dist = torch.ones_like(self.init_dist)
 
     def randomize_init(self, env_ids):
-        pass
+        if self.task_name == "lift":
+            pass
+        elif self.task_name == "flip":
+            mpm_x = wp.to_torch(self.state_0.mpm_x).clone().view(self.num_envs, -1, 3)
+            bounds = torch.tensor([0.04, 0.02, 0.04], device=self.device)
+            mpm_x[env_ids, :, :] += bounds * (torch.rand(size=(len(env_ids), 1, 3), device=self.device) - 0.5) * 2.0
+            self.state_0.mpm_x.assign(wp.from_torch(mpm_x.reshape(-1, 3)))
+        else:
+            raise NotImplementedError
 
     def pre_physics_step(self, actions):
         actions = actions.view(self.num_envs, -1)
@@ -198,12 +232,46 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         # self.control.assign("joint_act", wp.to_torch(self.model.joint_act).clone().flatten())
 
     def compute_observations(self):
-        self.obs_buf = {}
-        raise NotImplementedError
+        joint_q = self.state.joint_q.clone().view(self.num_envs, -1)
+        particle_q = self.state.mpm_x.clone().view(self.num_envs, -1, 3)
+
+        particle_q -= self.env_offsets.view(self.num_envs, 1, 3)
+
+        if self.downsample_particle is not None:
+            num_full = particle_q.shape[1]
+            downsample = num_full // self.downsample_particle
+            particle_q = particle_q[:, ::downsample, :]
+            # assert particle_q.shape[1] == self.downsample_particle
+
+        com_q = particle_q.mean(1)
+
+        self.obs_buf = {
+            "joint_q": joint_q,
+            "particle_q": particle_q,
+            "com_q": com_q,
+        }
 
     def compute_reward(self):
-        rew = None
-        raise NotImplementedError
+        particle_q = self.obs_buf["particle_q"]
+        com_q = self.obs_buf["com_q"]
+
+        if self.task_name == "lift":
+            rew = com_q[:, 1]  # maximize height
+        elif self.task_name == "flip":
+            half0_points, half1_points = particle_q[:, self.half0_indices, :], particle_q[:, self.half1_indices, :]
+            dist = torch.linalg.norm(half0_points - half1_points, dim=-1).mean(dim=-1)
+
+            first_mask = self.progress_buf == 1
+            if first_mask.any():
+                with torch.no_grad():
+                    self.init_dist[first_mask] = dist[first_mask]
+
+            ni = (self.init_dist - dist) / self.init_dist
+            ni = torch.clamp(ni, -1.0, 1.0)
+
+            rew = ni
+        else:
+            raise NotImplementedError
 
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
         max_episode_steps, early_termination = self.episode_length, self.early_termination
