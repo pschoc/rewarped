@@ -41,7 +41,7 @@ class IntegratorType(Enum):
         return self.value
 
 
-def compute_env_offsets(num_envs, env_offset=(5.0, 0.0, 5.0), up_axis="Y"):
+def compute_env_offsets(num_envs, env_offset=(5.0, 0.0, 5.0), env_offset_correction=True, up_axis="Y"):
     # compute positional offsets per environment
     env_offset = np.array(env_offset)
     nonzeros = np.nonzero(env_offset)[0]
@@ -73,6 +73,8 @@ def compute_env_offsets(num_envs, env_offset=(5.0, 0.0, 5.0), up_axis="Y"):
             offset[2] = d2 * env_offset[2]
             env_offsets.append(offset)
     env_offsets = np.array(env_offsets)
+    if not env_offset_correction:
+        return env_offsets
     min_offsets = np.min(env_offsets, axis=0)
     correction = min_offsets + (np.max(env_offsets, axis=0) - min_offsets) / 2.0
     if isinstance(up_axis, str):
@@ -160,6 +162,7 @@ class Environment:
     up_axis: str = "Y"
     gravity: float = -9.81
     env_offset: Tuple[float, float, float] = (1.0, 0.0, 1.0)
+    env_offset_correction: bool = True  # if False, then env_offsets are only + (not centered at origin)
 
     # whether each environment should have its own collision group
     # to avoid collisions between environments
@@ -251,7 +254,7 @@ class Environment:
         builder = self.create_modelbuilder()
         env_builder = self.create_modelbuilder()
         self.create_env(env_builder)
-        self.env_offsets = compute_env_offsets(self.num_envs, self.env_offset, self.up_axis)
+        self.env_offsets = compute_env_offsets(self.num_envs, self.env_offset, self.env_offset_correction, self.up_axis)
         for i in range(self.num_envs):
             xform = wp.transform(self.env_offsets[i], wp.quat_identity())
             builder.add_builder(
