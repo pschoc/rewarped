@@ -50,6 +50,16 @@ class MPMWarpEnvMixin:
         model.mpm_model.statics = self.builder.mpm_builder.statics_initializer.finalize()
         return model
 
+    def print_model_info(self):
+        super().print_model_info()
+        print("--- mpm ---")
+        print("mpm_particle_count", self.model.mpm_state.particle.x.shape[0])
+        print("mpm_x", self.model.mpm_state.particle.x)
+        print("mpm_v", self.model.mpm_state.particle.v)
+        print("mpm_vol", self.model.mpm_model.statics.vol)
+        print("mpm_rho", self.model.mpm_model.statics.rho)
+        print()
+
     def init_sim_mpm(self):
         wp.set_module_options({"fast_math": True})
         torch.backends.cudnn.benchmark = True
