@@ -171,6 +171,10 @@ class WarpEnv(Environment):
         self.act_space = spaces.Box(np.ones(self.num_act) * -1.0, np.ones(self.num_act) * 1.0)
 
     @property
+    def num_observations(self):
+        return self.num_obs
+
+    @property
     def num_actions(self):
         return self.num_act
 
@@ -184,6 +188,10 @@ class WarpEnv(Environment):
 
     @property
     def max_episode_steps(self):
+        return self.episode_length
+
+    @property
+    def max_episode_length(self):
         return self.episode_length
 
     @property
@@ -211,7 +219,7 @@ class WarpEnv(Environment):
             device=self.device,
         )
         self.actions = torch.zeros(
-            (self.num_envs, self.num_actions),
+            (self.num_envs, self.num_act),
             dtype=torch.float,
             device=self.device,
             requires_grad=self.requires_grad,
@@ -317,6 +325,9 @@ class WarpEnv(Environment):
             self.control.assign(k, v)
 
     def get_checkpoint(self, detach=False):
+        if not self.initialized:
+            raise RuntimeError("WarpEnv is not initialized, call reset() first")
+
         checkpoint = {"state": {}, "control": {}}
         for k in self.state_tensors_names:
             v = getattr(self.state, k)
