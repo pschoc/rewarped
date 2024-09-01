@@ -1,4 +1,5 @@
 import os
+from glob import glob
 
 import numpy as np
 import torch
@@ -326,6 +327,92 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             assert len(demo_traj) == self.episode_length
         return demo_traj
 
+    def run(self):
+        self.init()
+        self.initialized = True
+
+        TRAJ_OPT = True
+        LOAD_DEMO = False
+
+        if LOAD_DEMO:
+            # load actions from DexDeform teleop demos
+            demo_dir = os.path.join(self.asset_dir, "../data/DexDeform/demos")
+            demo_files = sorted(glob(os.path.join(demo_dir, f"{self.task_name}/*.pkl")))
+            demo_file = demo_files[-1]
+            traj = self.get_demo_actions(demo_file)
+        else:
+            traj = [
+                # torch.rand(self.num_envs, self.num_actions, device=self.device, requires_grad=True)
+                torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=True)
+                for _ in range(self.episode_length)
+            ]
+
+        train_iters = 50
+        train_rate = 0.1
+        opt = torch.optim.Adam(traj, lr=train_rate)
+
+        self.iter = 0
+        self.max_iter = train_iters
+        while self.iter < self.max_iter:
+            obs = self.reset(clear_grad=True)
+
+            profiler = {}
+            with wp.ScopedTimer("episode", detailed=False, print=False, active=True, dict=profiler):
+                obses, actions, rewards, dones, infos = [obs], [], [], [], []
+                for i in range(self.episode_length):
+                    action = traj[i]
+                    obs, reward, done, info = self.step(action)
+
+                    obses.append(obs)
+                    actions.append(action)
+                    rewards.append(reward)
+                    dones.append(done)
+                    infos.append(info)
+
+                if TRAJ_OPT:
+                    actions = torch.stack(actions)
+                    rewards = torch.stack(rewards)
+
+                    loss = -rewards[-1]
+
+                    opt.zero_grad()
+                    loss.sum().backward()
+                    opt.step()
+
+                    grad_norm = [x.grad.norm() for x in traj]
+                    grad_norm = torch.stack(grad_norm).mean()
+
+                    print(f"Iter: {self.iter} Loss: {loss.tolist()}")
+                    print(f"Grads: {grad_norm.item()}")
+                    print(
+                        "Traj actions:",
+                        actions.mean().item(),
+                        actions.std().item(),
+                        actions.min().item(),
+                        actions.max().item(),
+                    )
+                else:
+                    self.iter = self.max_iter
+
+            avg_time = np.array(profiler["episode"]).mean() / self.episode_length
+            avg_steps_second = 1000.0 * float(self.num_envs) / avg_time
+            total_time_second = np.array(profiler["episode"]).sum() / 1000.0
+
+            print(
+                f"num_envs: {self.num_envs} |",
+                f"steps/second: {avg_steps_second:.4} |",
+                f"milliseconds/step: {avg_time:.4f} |",
+                f"total_seconds: {total_time_second:.4f} |",
+            )
+            print()
+
+            self.iter += 1
+
+        if self.renderer is not None:
+            self.renderer.save()
+
+        return 1000.0 * float(self.num_envs) / avg_time
+
 
 if __name__ == "__main__":
-    run_env(Hand)
+    run_env(Hand, no_grad=False)
