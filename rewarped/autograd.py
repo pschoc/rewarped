@@ -108,6 +108,8 @@ class UpdateFunction(torch.autograd.Function):
             with tape:
                 sim_update(update_params, sim_params, states, control)
 
+            # # https://nvidia.github.io/warp/modules/differentiability.html#visualizing-computation-graphs
+            # # `dot -Tsvg tape.dot -o tape.svg`
             # tape.visualize(filename="tape.dot")
             # exit()
 
