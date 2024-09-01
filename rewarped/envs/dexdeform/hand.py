@@ -1,9 +1,23 @@
+import os
+
 import torch
+from omegaconf import OmegaConf
 
 import warp as wp
 
 from ...environment import IntegratorType, run_env
 from ...warp_env import WarpEnv
+from .utils.interface import DEFAULT_INITIAL_QPOS
+
+TASK_LENGTHS = {
+    # "folding": 250,
+    # "rope": 250,
+    # "bun": 250,
+    # "dumpling": 250,
+    # "wrap": 500,
+    "flip": 500,
+    "lift": 100,
+}
 
 
 class Hand(WarpEnv):
@@ -33,6 +47,24 @@ class Hand(WarpEnv):
         super().__init__(num_envs, num_obs, num_act, episode_length, early_termination, **kwargs)
 
         self.action_scale = 1.0
+
+        self.dexdeform_cfg = self.create_cfg_dexdeform()
+        print(self.dexdeform_cfg)
+
+    def create_cfg_dexdeform(self):
+        cfg_file = os.path.join(os.path.dirname(__file__), f"env_cfgs/{self.task_name}.yml")
+        dexdeform_cfg = OmegaConf.load(open(cfg_file, "r"))
+
+        dexdeform_cfg.SIMULATOR.gravity = eval(dexdeform_cfg.SIMULATOR.gravity)
+        for i, shape in enumerate(dexdeform_cfg.SHAPES):
+            dexdeform_cfg.SHAPES[i].init_pos = eval(shape.init_pos)
+            if "width" in shape:
+                dexdeform_cfg.SHAPES[i].width = eval(shape.width)
+        for i, manipulator in enumerate(dexdeform_cfg.MANIPULATORS):
+            dexdeform_cfg.MANIPULATORS[i].init_pos = eval(manipulator.init_pos)
+            dexdeform_cfg.MANIPULATORS[i].init_rot = eval(manipulator.init_rot)
+
+        return dexdeform_cfg
 
     def create_modelbuilder(self):
         builder = super().create_modelbuilder()
