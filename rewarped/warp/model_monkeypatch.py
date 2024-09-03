@@ -87,6 +87,17 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
                 (self.body_count,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad
             )
 
+        # allocate mass, Jacobian matrices, and other auxiliary variables pertaining to the model
+        if self.joint_count:
+            # system matrices
+            s.M = wp.zeros((self.fs_M_size,), dtype=wp.float32, device=self.device, requires_grad=requires_grad)
+            s.J = wp.zeros((self.fs_J_size,), dtype=wp.float32, device=self.device, requires_grad=requires_grad)
+            s.P = wp.empty_like(s.J, requires_grad=requires_grad)
+            s.H = wp.empty((self.fs_H_size,), dtype=wp.float32, device=self.device, requires_grad=requires_grad)
+
+            # zero since only upper triangle is set which can trigger NaN detection
+            s.L = wp.zeros_like(s.H)
+
         s._featherstone_augmented = True
 
     if integrator_type == "mpm":
