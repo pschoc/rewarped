@@ -1060,8 +1060,11 @@ class MPMStateInitializer(StateInitializer):
 
         state_0 = super().finalize(shape=pos_groups.shape[0], requires_grad=requires_grad)
 
-        state_0.particle.x.assign(pos_groups)
-        state_0.particle.v.assign(vel_groups)
+        pos_groups = pos_groups.astype(dtype=np.float32)
+        vel_groups = vel_groups.astype(dtype=np.float32)
+
+        state_0.particle.x.assign(wp.from_numpy(pos_groups))
+        state_0.particle.v.assign(wp.from_numpy(vel_groups))
 
         return state_0, sections
 
