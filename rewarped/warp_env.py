@@ -9,6 +9,19 @@ from .environment import Environment, RenderMode
 from .warp.model_monkeypatch import Model_control, Model_state
 
 
+@torch.jit.script
+def scatter_clone(input, index, src, dim: int = -1):
+    """Write `src` into a copy of `input` at indices specified in `index` along axis `dim`.
+
+    Gradients will flow back from the result of this operation to `src`, but not `input`.
+    """
+    input = input.detach().clone()
+    if src.requires_grad:
+        input.requires_grad_()
+    out = input.scatter(dim, index, src)
+    return out
+
+
 class StateTensors:
     r"""Simple wrapper around `wp.sim.State()` to access `state_tensors` as attributes.
 
@@ -169,6 +182,8 @@ class WarpEnv(Environment):
         self.num_act = num_act
         self.obs_space = spaces.Box(np.ones(self.num_obs) * -np.Inf, np.ones(self.num_obs) * np.Inf)
         self.act_space = spaces.Box(np.ones(self.num_act) * -1.0, np.ones(self.num_act) * 1.0)
+
+        self.scatter_actions = staticmethod(scatter_clone)  # alias for convenience
 
     @property
     def num_observations(self):
