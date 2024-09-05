@@ -59,6 +59,7 @@ class Task(WarpEnv):
         else:
             super().reset_idx(env_ids)
 
+    @torch.no_grad()
     def randomize_init(self, env_ids):
         pass
 

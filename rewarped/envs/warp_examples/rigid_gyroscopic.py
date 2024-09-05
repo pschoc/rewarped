@@ -82,7 +82,7 @@ class RigidGyroscopic(WarpEnv):
 
     def init_sim(self):
         super().init_sim()
-        # self.print_model_info()
+        self.print_model_info()
 
     def reset_idx(self, env_ids):
         if self.early_termination:
@@ -90,6 +90,7 @@ class RigidGyroscopic(WarpEnv):
         else:
             super().reset_idx(env_ids)
 
+    @torch.no_grad()
     def randomize_init(self, env_ids):
         pass
 

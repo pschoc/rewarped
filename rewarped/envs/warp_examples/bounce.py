@@ -102,6 +102,7 @@ class Bounce(WarpEnv):
             super().reset_idx(env_ids)
             self.traj_verts = []
 
+    @torch.no_grad()
     def randomize_init(self, env_ids):
         pass
 
