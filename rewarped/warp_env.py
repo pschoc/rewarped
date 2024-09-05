@@ -356,7 +356,7 @@ class WarpEnv(Environment):
             checkpoint["control"][k] = v.clone()
         return checkpoint
 
-    def reset(self, env_ids=None, clear_grad=None):
+    def reset(self, env_ids=None, clear_grad=False):
         if not self.initialized:
             self.init()
             self.initialized = True
@@ -366,28 +366,8 @@ class WarpEnv(Environment):
 
         self.reset_idx(env_ids)
 
-        # clear action
-        N = len(env_ids)
-        if N == self.num_envs:
-            self.actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float, device=self.device)
-        else:
-            if self.requires_grad and clear_grad is False:
-                new_actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float, device=self.device)
-                new_actions.requires_grad_()
-                mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-                mask[env_ids] = 0  # mask == True if not reset
-                other_env_ids = torch.where(mask)[0]
-                if len(other_env_ids) > 0:
-                    indices = other_env_ids.unsqueeze(1).expand(-1, self.num_actions)
-                    new_actions.scatter(0, indices, self.actions)
-                self.actions = new_actions
-            else:
-                self.actions = self.actions.detach().clone()
-                self.actions[env_ids, :] = torch.zeros((N, self.num_actions), dtype=torch.float, device=self.device)
-
         self.progress_buf[env_ids] = 0
         self.num_frames = 0
-
         self.integrator._step = 0
 
         # initialize_trajectory()
@@ -437,6 +417,8 @@ class WarpEnv(Environment):
                     self.control_tensors_names,
                     *tensors,
                 )
+                num_state = len(self.state_tensors_names)
+                self.state_tensors = list(outputs[:num_state])
             else:
                 ctx = torch.autograd.function.FunctionCtx()
                 state_tensors_names, control_tensors_names = [], []
@@ -453,8 +435,6 @@ class WarpEnv(Environment):
                 )
                 outputs = []
 
-            num_state = len(self.state_tensors_names)
-            self.state_tensors = list(outputs[:num_state])
             self.state_1 = self.state_0  # needed for renderer
             self.state_0 = state_1
 
@@ -462,6 +442,7 @@ class WarpEnv(Environment):
             self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
         else:
             super().update()
+            # self.control_0 = self.model.control()
 
     def step(self, actions):
         with wp.ScopedTimer("simulate", active=False, detailed=False):
@@ -500,24 +481,62 @@ class WarpEnv(Environment):
         return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
 
     def reset_idx(self, env_ids):
-        assert len(env_ids) == self.num_envs
-        assert not self.early_termination
-        # reset state and control
+        if self.early_termination:
+            prev_action = self.actions
+            prev_state = StateTensors(self.state_0, self.state_tensors_names, self.state_tensors)
+            # prev_control = ControlTensors(self.control_0, self.control_tensors_names, self.control_tensors)
+        else:
+            assert len(env_ids) == self.num_envs
+        self.actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float, device=self.device)
         self.state_0 = self.model.state()
         self.control_0 = self.model.control()
-        self.state_0.clear_forces()
-        self.control_0.clear_acts()
+        # self.state_0.clear_forces()
+        # self.control_0.clear_acts()
+        if self.requires_grad:
+            self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
+            self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
 
         if self.randomize:
             self.randomize_init(env_ids)
 
         if self.eval_fk:
             mask = None
+            # mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            # mask[env_ids] = True
+            # mask = wp.from_torch(mask)
             wp.sim.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, mask, self.state_0)
-            # TODO: wrap this in torch.autograd.Function?
 
-        self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
-        self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
+        # copy over the state and control for prev envs that were not reset
+        if self.early_termination:
+            reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            reset_mask[env_ids] = True
+            prev_env_ids = torch.where(~reset_mask)[0]
+
+            if len(prev_env_ids) > 0:
+                self.actions.index_copy_(0, prev_env_ids, prev_action[prev_env_ids])
+                # self.actions = self.actions.index_copy(0, prev_env_ids, prev_action[prev_env_ids])
+
+                def copy_prev(x, prev_x, name, inplace=True):
+                    attr, prev_attr = getattr(x, name), getattr(prev_x, name)
+                    shape = attr.shape
+                    attr, prev_attr = attr.view(self.num_envs, -1), prev_attr.view(self.num_envs, -1)
+                    if inplace:
+                        attr.detach().index_copy_(0, prev_env_ids, prev_attr[prev_env_ids])
+                    else:
+                        attr = attr.index_copy(0, prev_env_ids, prev_attr[prev_env_ids])
+                        x.assign(name, attr.reshape(shape))
+
+                # TODO: Add fn to get wp.array attributes instead of vars(..)
+                for name in vars(self.state_0):
+                    if not isinstance(getattr(self.state_0, name), wp.array):
+                        continue
+                    copy_prev(self.state, prev_state, name)
+
+                # # NOTE: Don't need to copy control since it's recreated at the end of do_physics_step(..)
+                # for name in vars(self.control_0):
+                #     if not isinstance(getattr(self.control_0, name), wp.array):
+                #         continue
+                #     copy_prev(self.control, prev_control, name)
 
     def randomize_init(self, env_ids):
         raise NotImplementedError

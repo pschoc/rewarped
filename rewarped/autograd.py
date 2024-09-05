@@ -8,7 +8,8 @@ from .warp_utils import sim_update
 # for checkpointing method
 def assign_tensors(x, x_out, names, tensors):
     # need to assign b/c state_0, state_1 cannot be swapped
-    for name in dir(x):
+    # TODO: Add fn to get wp.array attributes instead of vars(..)
+    for name in vars(x):
         if name in names:
             continue
         attr = getattr(x, name)
@@ -60,7 +61,7 @@ class UpdateFunction(torch.autograd.Function):
             tape = wp.Tape()
             update_params = (tape, *update_params[1:])
 
-        # for name in dir(model):
+        # for name in vars(model):
         #     attr = getattr(model, name)
         #     if isinstance(attr, wp.array):
         #         # print(name)
