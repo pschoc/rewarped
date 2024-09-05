@@ -96,10 +96,10 @@ class Bounce(WarpEnv):
             self.target = torch.tensor(self.target, device=self.device)
 
     def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
         if self.early_termination:
             raise NotImplementedError
         else:
-            super().reset_idx(env_ids)
             self.traj_verts = []
 
     @torch.no_grad()

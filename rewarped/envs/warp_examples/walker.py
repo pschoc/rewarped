@@ -163,12 +163,6 @@ class Walker(WarpEnv):
             self.tet_activations = wp.to_torch(self.model.tet_activations).view(self.num_envs, -1).clone()
             self.tet_activations_indices = ...
 
-    def reset_idx(self, env_ids):
-        if self.early_termination:
-            raise NotImplementedError
-        else:
-            super().reset_idx(env_ids)
-
     @torch.no_grad()
     def randomize_init(self, env_ids):
         pass

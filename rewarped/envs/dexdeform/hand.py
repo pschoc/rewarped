@@ -200,11 +200,9 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                 self.half1_indices = torch.flip(self.half1_indices, [0])
 
     def reset_idx(self, env_ids):
-        if self.early_termination:
-            raise NotImplementedError
-        else:
-            super().reset_idx(env_ids)
-            self.init_dist = torch.ones_like(self.init_dist)
+        super().reset_idx(env_ids)
+        with torch.no_grad():
+            self.init_dist[env_ids] = 1.0
 
     @torch.no_grad()
     def randomize_init(self, env_ids):
