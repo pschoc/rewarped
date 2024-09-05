@@ -180,7 +180,7 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
     def init_sim(self):
         self.init_sim_mpm()
         super().init_sim()
-        # self.print_model_info()
+        self.print_model_info()
 
         with torch.no_grad():
             self.joint_act = wp.to_torch(self.model.joint_act).view(self.num_envs, -1).clone()
@@ -206,14 +206,14 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             super().reset_idx(env_ids)
             self.init_dist = torch.ones_like(self.init_dist)
 
+    @torch.no_grad()
     def randomize_init(self, env_ids):
         if self.task_name == "lift":
             pass
         elif self.task_name == "flip":
-            mpm_x = wp.to_torch(self.state_0.mpm_x).clone().view(self.num_envs, -1, 3)
+            mpm_x = self.state.mpm_x.view(self.num_envs, -1, 3)
             bounds = torch.tensor([0.04, 0.02, 0.04], device=self.device)
             mpm_x[env_ids, :, :] += bounds * (torch.rand(size=(len(env_ids), 1, 3), device=self.device) - 0.5) * 2.0
-            self.state_0.mpm_x.assign(wp.from_torch(mpm_x.reshape(-1, 3)))
         else:
             raise NotImplementedError
 
@@ -234,7 +234,6 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         else:
             joint_act = self.scatter_actions(self.joint_act, self.joint_act_indices, acts)
             self.control.assign("joint_act", joint_act.flatten())
-        # self.control.assign("joint_act", wp.to_torch(self.model.joint_act).clone().flatten())
 
     def compute_observations(self):
         joint_q = self.state.joint_q.clone().view(self.num_envs, -1)
