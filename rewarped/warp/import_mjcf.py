@@ -403,7 +403,7 @@ def parse_mjcf(
                     )
                     shapes.append(s)
                 else:
-                    half_height = geom_radius
+                    half_height = geom_height
                     if reduce_capsule_height_by_radius:
                         half_height = geom_height - (0.5 * geom_radius)
                     s = builder.add_shape_capsule(
