@@ -53,11 +53,13 @@ class MPMWarpEnvMixin:
     def print_model_info(self):
         super().print_model_info()
         print("--- mpm ---")
+        print("mpm_dt", self.model.mpm_model.constant.dt)
         print("mpm_particle_count", self.model.mpm_state.particle.x.shape[0])
         print("mpm_x", self.model.mpm_state.particle.x)
         print("mpm_v", self.model.mpm_state.particle.v)
         print("mpm_vol", self.model.mpm_model.statics.vol)
         print("mpm_rho", self.model.mpm_model.statics.rho)
+        print("mpm_material", self.model.mpm_model.statics.material)
         print()
 
     def init_sim_mpm(self):

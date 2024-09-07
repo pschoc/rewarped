@@ -398,6 +398,7 @@ class Environment:
 
     def print_model_info(self):
         print("--- Model Info ---")
+        print("num_envs", self.num_envs)
         print("frame_dt", self.frame_dt)
         print("sim_dt", self.sim_dt)
         print("sim_substeps", self.sim_substeps)
