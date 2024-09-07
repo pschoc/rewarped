@@ -146,9 +146,11 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
 
     def create_cfg_mpm(self, mpm_cfg):
         mpm_cfg.update(["--physics.sim", "dexdeform"])
-        mpm_cfg.update(["--physics.env", "dexdeform"])
+        mpm_cfg.update(["--physics.env", "plasticine"])
 
-        # mpm_cfg.update(["--physics.sim.gravity", str(tuple(self.dexdeform_cfg.SIMULATOR.gravity))])
+        # https://github.com/sizhe-li/DexDeform/blob/72f5087ed4e46cf88092f36d6ced9a72978d8c01/mpm/simulator.py#L385
+        gravity = np.array(self.dexdeform_cfg.SIMULATOR.gravity) * 30
+        mpm_cfg.update(["--physics.sim.gravity", str(tuple(gravity))])
         mpm_cfg.update(["--physics.sim.body_friction", str(self.dexdeform_cfg.SIMULATOR.hand_friction)])
 
         if self.task_name == "lift":

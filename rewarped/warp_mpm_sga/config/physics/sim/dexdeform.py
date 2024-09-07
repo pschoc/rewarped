@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from .base import BaseSimConfig
 
 @dataclass(kw_only=True)
-class DexDeformSimConfig(BaseSimConfig, name="dexdeform"):
+class DexDeformSimConfig(BaseSimConfig, name='dexdeform'):
     num_steps: int = 1000
     gravity: tuple[float, float, float] = (0.0, -90.0, 0.0)
     bc: str = 'dexdeform'
