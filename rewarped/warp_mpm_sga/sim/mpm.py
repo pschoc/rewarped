@@ -851,14 +851,15 @@ class MPMInitData(object):
                 cfg['shape']['vol'],
                 cfg['shape']['mode'],
             )
-        elif cfg['shape']['type'] == 'mesh':
+        elif cfg['shape']['name'].startswith('mesh'):
             kwargs = cls.get_mesh(
                 cfg['shape']['name'],
+                cfg['shape']['filepath'],
                 cfg['shape']['center'],
                 cfg['shape']['size'],
                 cfg['shape']['resolution'],
                 cfg['shape']['mode'],
-                cfg['shape']['sort']
+                cfg['shape'].get('sort', None),
             )
         else:
             raise ValueError('invalid shape type: {}'.format(cfg['shape']['type']))
@@ -887,6 +888,7 @@ class MPMInitData(object):
     def get_mesh(
             cls,
             name: str,
+            filepath: str,
             center: list | np.ndarray,
             size: list | np.ndarray,
             resolution: int,
@@ -896,8 +898,10 @@ class MPMInitData(object):
         center = np.array(center)
         size = np.array(size)
 
+        fn = filepath.split('/')[-1].split('.')[0]
+
         asset_root = cls.asset_root
-        precompute_name = f'{name}_{resolution}_{mode}.npz'
+        precompute_name = f'{name}_{fn}_{resolution}_{mode}.npz'
 
         if (asset_root / precompute_name).is_file():
             file = np.load(asset_root / precompute_name)
@@ -907,7 +911,7 @@ class MPMInitData(object):
 
             import trimesh
 
-            mesh: trimesh.Trimesh = trimesh.load(asset_root / f'{name}.obj', force='mesh')
+            mesh: trimesh.Trimesh = trimesh.load(asset_root / '..' / f'{filepath}', force='mesh')
 
             # if not mesh.is_watertight:
             #     raise ValueError('invalid mesh: not watertight')
