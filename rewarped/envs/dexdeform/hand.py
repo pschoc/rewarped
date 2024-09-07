@@ -153,15 +153,27 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         mpm_cfg.update(["--physics.sim.gravity", str(tuple(gravity))])
         mpm_cfg.update(["--physics.sim.body_friction", str(self.dexdeform_cfg.SIMULATOR.hand_friction)])
 
+        def update_plasticine_params():
+            E, nu = self.dexdeform_cfg.SIMULATOR.E, self.dexdeform_cfg.SIMULATOR.nu
+            yield_stress = self.dexdeform_cfg.SIMULATOR.yield_stress
+            mpm_cfg.update(["--physics.env.physics.E", str(E)])
+            mpm_cfg.update(["--physics.env.physics.nu", str(nu)])
+            mpm_cfg.update(["--physics.env.physics.yield_stress", str(yield_stress)])
+
         if self.task_name == "lift":
+            # update_plasticine_params()
+
             shape_cfg = self.dexdeform_cfg.SHAPES[0]
             init_pos, width = shape_cfg.init_pos, shape_cfg.width
+            resolution = 20
             mpm_cfg.update(["--physics.env.shape", "cube"])
             mpm_cfg.update(["--physics.env.shape.center", str(tuple(init_pos))])
             mpm_cfg.update(["--physics.env.shape.size", str(tuple(width))])
-            mpm_cfg.update(["--physics.env.shape.resolution", str(20)])
+            mpm_cfg.update(["--physics.env.shape.resolution", str(resolution)])
             # TODO: change resolution based on num_particles
         elif self.task_name == "flip":
+            # update_plasticine_params()
+
             mpm_cfg.update(["--physics.env.shape", "cylinder_dexdeform"])
             # mpm_cfg.update(["--physics.env.shape.num_particles", str(self.dexdeform_cfg.SIMULATOR.n_particles)])
 
