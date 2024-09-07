@@ -10,9 +10,9 @@ class SandPhysicsConfig(BasePhysicsConfig, name='sand'):
     material: str = 'sand'
     elasticity: str = 'sigma'
 
-    # # NClaw
-    # E: float = 1e6
-    # nu: float = 0.2
+    # NClaw
+    E: float = 1e6
+    nu: float = 0.2
 
     youngs_modulus: float = field(init=False)
     youngs_modulus_log: float = 10.0

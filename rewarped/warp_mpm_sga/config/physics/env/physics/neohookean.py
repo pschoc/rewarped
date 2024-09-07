@@ -8,6 +8,11 @@ from .base import BasePhysicsConfig
 class NeoHookeanPhysicsConfig(BasePhysicsConfig, name='neohookean'):
     path: str = str(Path(__file__).parent.resolve() / 'templates' / 'neohookean.py')
     material: str = 'neohookean'
+
+    # NClaw
+    E: float = 1e5
+    nu: float = 0.2
+
     youngs_modulus_log: float = 13.0
     poissons_ratio_sigmoid: float = 0.0
     youngs_modulus: float = field(init=False)

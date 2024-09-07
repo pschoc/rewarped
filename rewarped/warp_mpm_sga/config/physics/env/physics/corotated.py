@@ -9,9 +9,9 @@ class CorotatedPhysicsConfig(BasePhysicsConfig, name='corotated'):
     path: str = str(Path(__file__).parent.resolve() / 'templates' / 'corotated.py')
     material = 'corotated'
 
-    # # NClaw
-    # E: float = 1e5
-    # nu: float = 0.2
+    # NClaw
+    E: float = 1e5
+    nu: float = 0.2
 
     youngs_modulus_log: float = 10.0
     poissons_ratio_sigmoid: float = -1.0
