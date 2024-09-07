@@ -726,6 +726,22 @@ class MPMModel(Model):
             particle.F[p] = materials.plasticine_deformation(particle.F_trial[p], material)
             particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
 
+        if material.name == materials.MATL_WATER:
+            particle.F[p] = materials.water_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.volume_elasticity(particle.F[p], material)
+
+        if material.name == materials.MATL_SAND:
+            particle.F[p] = materials.sand_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
+
+        if material.name == materials.MATL_NEOHOOKEAN:
+            particle.F[p] = materials.identity_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.neohookean_elasticity(particle.F[p], material)
+
+        if material.name == materials.MATL_COROTATED:
+            particle.F[p] = materials.identity_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.corotated_elasticity(particle.F[p], material)
+
 
 class MPMModelBuilder(ModelBuilder):
 
@@ -835,14 +851,15 @@ class MPMInitData(object):
                 cfg['shape']['vol'],
                 cfg['shape']['mode'],
             )
-        elif cfg['shape']['type'] == 'mesh':
+        elif cfg['shape']['name'].startswith('mesh'):
             kwargs = cls.get_mesh(
                 cfg['shape']['name'],
+                cfg['shape']['filepath'],
                 cfg['shape']['center'],
                 cfg['shape']['size'],
                 cfg['shape']['resolution'],
                 cfg['shape']['mode'],
-                cfg['shape']['sort']
+                cfg['shape'].get('sort', None),
             )
         else:
             raise ValueError('invalid shape type: {}'.format(cfg['shape']['type']))
@@ -854,11 +871,15 @@ class MPMInitData(object):
         if 'poissons_ratio' in cfg['physics']:
             nu = cfg['physics']['poissons_ratio']
         yield_stress = cfg['physics'].get('yield_stress', None)
+        cohesion = cfg['physics'].get('cohesion', None)
+        alpha = cfg['physics'].get('alpha', None)
         material = materials.get_material(
             cfg['physics']['material'],
             E=E,
             nu=nu,
             yield_stress=yield_stress,
+            cohesion=cohesion,
+            alpha=alpha,
         )
 
         return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], material=material, **kwargs)
@@ -867,6 +888,7 @@ class MPMInitData(object):
     def get_mesh(
             cls,
             name: str,
+            filepath: str,
             center: list | np.ndarray,
             size: list | np.ndarray,
             resolution: int,
@@ -876,8 +898,10 @@ class MPMInitData(object):
         center = np.array(center)
         size = np.array(size)
 
+        fn = filepath.split('/')[-1].split('.')[0]
+
         asset_root = cls.asset_root
-        precompute_name = f'{name}_{resolution}_{mode}.npz'
+        precompute_name = f'{name}_{fn}_{resolution}_{mode}.npz'
 
         if (asset_root / precompute_name).is_file():
             file = np.load(asset_root / precompute_name)
@@ -887,7 +911,7 @@ class MPMInitData(object):
 
             import trimesh
 
-            mesh: trimesh.Trimesh = trimesh.load(asset_root / f'{name}.obj', force='mesh')
+            mesh: trimesh.Trimesh = trimesh.load(asset_root / '..' / f'{filepath}', force='mesh')
 
             # if not mesh.is_watertight:
             #     raise ValueError('invalid mesh: not watertight')

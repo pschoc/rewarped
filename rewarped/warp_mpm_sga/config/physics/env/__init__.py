@@ -4,4 +4,8 @@ from .base import BaseEnvConfig
 
 from .jelly import JellyEnvConfig
 
-from .dexdeform import DexDeformEnvConfig
+from .plasticine import PlasticineEnvConfig
+
+from .sand import SandEnvConfig
+
+from .water import WaterEnvConfig
