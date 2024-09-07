@@ -726,6 +726,10 @@ class MPMModel(Model):
             particle.F[p] = materials.plasticine_deformation(particle.F_trial[p], material)
             particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
 
+        if material.name == materials.MATL_WATER:
+            particle.F[p] = materials.water_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.volume_elasticity(particle.F[p], material)
+
 
 class MPMModelBuilder(ModelBuilder):
 

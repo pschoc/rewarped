@@ -2,6 +2,7 @@ import warp as wp
 
 
 MATL_PLASTICINE = wp.constant(0)
+MATL_WATER = wp.constant(1)
 
 
 @wp.struct
@@ -26,12 +27,21 @@ def get_material(
         material.E = E
         material.nu = nu
         material.yield_stress = yield_stress
-
-        material.mu = E / (2.0 * (1.0 + nu))
-        material.lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+        material.mu, material.lam = get_lame(E, nu)
+    elif name == 'water':
+        material.name = MATL_WATER
+        material.E = E
+        material.nu = nu
+        material.mu, material.lam = get_lame(E, nu)
     else:
         raise ValueError(type)
     return material
+
+
+def get_lame(E, nu):
+    mu = E / (2.0 * (1.0 + nu))
+    lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    return mu, lam
 
 
 @wp.func
@@ -91,6 +101,14 @@ def plasticine_deformation(F_trial: wp.mat33, material: MPMMaterial):  # von_mis
 
 
 @wp.func
+def water_deformation(F_trial: wp.mat33, material: MPMMaterial):
+    J = wp.determinant(F_trial)
+    Je_1_3 = wp.pow(J, 1.0 / 3.0)
+    F_corrected = wp.diag(wp.vec3(Je_1_3, Je_1_3, Je_1_3))
+    return F_corrected
+
+
+@wp.func
 def sigma_elasticity(F: wp.mat33, material: MPMMaterial):
     U, sigma, Vh = svd(F)
 
@@ -108,6 +126,6 @@ def sigma_elasticity(F: wp.mat33, material: MPMMaterial):
 @wp.func
 def volume_elasticity(F: wp.mat33, material: MPMMaterial):
     J = wp.determinant(F)
-    I = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    I = wp.identity(n=3, dtype=float)
     stress = material.lam * J * (J - 1.0) * I
     return stress
