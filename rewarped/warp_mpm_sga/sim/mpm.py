@@ -730,6 +730,10 @@ class MPMModel(Model):
             particle.F[p] = materials.water_deformation(particle.F_trial[p], material)
             particle.stress[p] = materials.volume_elasticity(particle.F[p], material)
 
+        if material.name == materials.MATL_SAND:
+            particle.F[p] = materials.sand_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
+
 
 class MPMModelBuilder(ModelBuilder):
 
@@ -858,11 +862,15 @@ class MPMInitData(object):
         if 'poissons_ratio' in cfg['physics']:
             nu = cfg['physics']['poissons_ratio']
         yield_stress = cfg['physics'].get('yield_stress', None)
+        cohesion = cfg['physics'].get('cohesion', None)
+        alpha = cfg['physics'].get('alpha', None)
         material = materials.get_material(
             cfg['physics']['material'],
             E=E,
             nu=nu,
             yield_stress=yield_stress,
+            cohesion=cohesion,
+            alpha=alpha,
         )
 
         return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], material=material, **kwargs)
