@@ -734,6 +734,14 @@ class MPMModel(Model):
             particle.F[p] = materials.sand_deformation(particle.F_trial[p], material)
             particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)
 
+        if material.name == materials.MATL_NEOHOOKEAN:
+            particle.F[p] = materials.identity_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.neohookean_elasticity(particle.F[p], material)
+
+        if material.name == materials.MATL_COROTATED:
+            particle.F[p] = materials.identity_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.corotated_elasticity(particle.F[p], material)
+
 
 class MPMModelBuilder(ModelBuilder):
 
