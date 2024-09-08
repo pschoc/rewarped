@@ -27,14 +27,14 @@ class MPMStatics(Statics):
 
     vol: wp.array(dtype=float)
     rho: wp.array(dtype=float)
-    clip_bound: wp.array(dtype=float)
+    env_id: wp.array(dtype=int)
     material_id: wp.array(dtype=int)
     material: wp.array(dtype=materials.MPMMaterial)
 
     def init(self, shape: ShapeLike, device: Devicelike = None) -> None:
         self.vol = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
         self.rho = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
-        self.clip_bound = wp.zeros(shape=shape, dtype=float, device=device, requires_grad=False)
+        self.env_id = wp.zeros(shape=shape, dtype=int, device=device, requires_grad=False)
         self.material_id = wp.zeros(shape=shape, dtype=int, device=device, requires_grad=False)
         self.material = wp.zeros(shape=(0,), dtype=materials.MPMMaterial, device=device, requires_grad=False)
 
@@ -50,11 +50,11 @@ class MPMStatics(Statics):
             wp.launch(self.set_float, dim=self.rho.shape, inputs=[self.rho, offset, offset + section, rho], device=self.rho.device)
             offset += section
 
-    def update_clip_bound(self, sections: list[int], clip_bounds: list[float]) -> None:
+    def update_env_id(self, sections: list[int], env_ids: list[float]) -> None:
         offset = 0
-        for section, clip_bound in zip(sections, clip_bounds):
-            wp.launch(self.set_float, dim=self.clip_bound.shape, inputs=[
-                self.clip_bound, offset, offset + section, clip_bound], device=self.clip_bound.device)
+        for section, env_id in zip(sections, env_ids):
+            wp.launch(self.set_int, dim=self.env_id.shape, inputs=[
+                self.env_id, offset, offset + section, env_id], device=self.env_id.device)
             offset += section
 
     def update_material(self, sections: list[int], material_ids: list[int], _materials: list[materials.MPMMaterial]) -> None:
@@ -202,19 +202,26 @@ class MPMGridData(object):
         clone.m = wp.empty_like(self.m, requires_grad=requires_grad)
         return clone
 
+
 @wp.struct
 class MPMConstant(object):
 
-    num_envs: int = 1
     num_grids: int
     dt: float
     bound: int
+    clip_bound: float
     gravity: wp.vec3
     dx: float
     inv_dx: float
     eps: float
+
     body_friction: float
     body_softness: float
+
+    lower_lim: wp.vec3
+    upper_lim: wp.vec3
+    env_offsets: wp.array(dtype=wp.vec3)
+    num_envs: int = 1
 
 
 class MPMState(State):
@@ -700,7 +707,7 @@ class MPMModel(Model):
         particle_next.C[p] = new_C
         particle_next.F_trial[p] = (wp.identity(n=3, dtype=float) + constant.dt * new_C) * particle_curr.F[p]
 
-        bound = statics.clip_bound[p] * constant.dx
+        bound = constant.clip_bound * constant.dx
         new_x = particle_curr.x[p] + constant.dt * new_v
         # TODO: assumes parallel envs are stacked along +x dim only
         new_x = wp.vec3(
@@ -749,11 +756,17 @@ class MPMModelBuilder(ModelBuilder):
     ConstantType = MPMConstant
     ModelType = MPMModel
 
-    def parse_cfg(self, cfg: config.physics.sim.BaseSimConfig, num_envs: int = 1) -> 'MPMModelBuilder':
+    def parse_cfg(
+        self,
+        cfg: config.physics.sim.BaseSimConfig,
+        num_envs: int = 1,
+        env_offsets: list | np.ndarray = None,
+    ) -> 'MPMModelBuilder':
 
         num_grids: int = cfg['num_grids']
         dt: float = cfg['dt']
-        bound: int = cfg['bound']
+        bound: int = cfg['bound']  # grid bound
+        clip_bound: float = cfg['clip_bound']
         gravity: np.ndarray = np.array(cfg['gravity'], dtype=np.float32)
         bc: str = cfg['bc']  # boundary condition
         eps: float = cfg['eps']
@@ -761,18 +774,26 @@ class MPMModelBuilder(ModelBuilder):
         dx: float = 1 / num_grids
         inv_dx: float = float(num_grids)
 
+        lower_lim: np.array = np.array(cfg['lower_lim'], dtype=np.float32)
+        upper_lim: np.array = np.array(cfg['upper_lim'], dtype=np.float32)
+
         body_friction: float = cfg['body_friction']
         body_softness: float = cfg['body_softness']
 
-        self.config['num_envs'] = num_envs
         self.config['num_grids'] = num_grids
         self.config['dt'] = dt
         self.config['bound'] = bound
+        self.config['clip_bound'] = clip_bound
         self.config['gravity'] = gravity
         self.config['dx'] = dx
         self.config['inv_dx'] = inv_dx
         self.config['bc'] = bc
         self.config['eps'] = eps
+
+        self.config['lower_lim'] = lower_lim
+        self.config['upper_lim'] = upper_lim
+        self.config['env_offsets'] = env_offsets
+        self.config['num_envs'] = num_envs
 
         self.config['body_friction'] = body_friction
         self.config['body_softness'] = body_softness
@@ -782,14 +803,19 @@ class MPMModelBuilder(ModelBuilder):
     def build_constant(self) -> ConstantType:
 
         constant = super().build_constant()
-        constant.num_envs = self.config['num_envs']
         constant.num_grids = self.config['num_grids']
         constant.dt = self.config['dt']
         constant.bound = self.config['bound']
+        constant.clip_bound = self.config['clip_bound']
         constant.gravity = wp.vec3(*self.config['gravity'])
         constant.dx = self.config['dx']
         constant.inv_dx = self.config['inv_dx']
         constant.eps = self.config['eps']
+
+        constant.lower_lim = wp.vec3(*self.config['lower_lim'])
+        constant.upper_lim = wp.vec3(self.config['upper_lim'])
+        constant.env_offsets = wp.array(self.config['env_offsets'], dtype=wp.vec3)
+        constant.num_envs = self.config['num_envs']
 
         constant.body_friction = self.config['body_friction']
         constant.body_softness = self.config['body_softness']
@@ -814,11 +840,8 @@ class MPMModelBuilder(ModelBuilder):
 class MPMInitData(object):
 
     rho: float
-    clip_bound: float
-
     num_particles: int
     vol: float
-
     material: materials.MPMMaterial
 
     pos: np.ndarray
@@ -826,6 +849,7 @@ class MPMInitData(object):
     ang_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
     center: np.ndarray = None
     ind_vel: np.ndarray = None
+    env_id: int = 0
 
     asset_root = Path(__file__).resolve().parent.parent.parent.parent / 'assets' / 'warp_mpm_sga'
 
@@ -878,7 +902,7 @@ class MPMInitData(object):
             alpha=alpha,
         )
 
-        return cls(rho=cfg['rho'], clip_bound=cfg['clip_bound'], material=material, **kwargs)
+        return cls(rho=cfg['rho'], material=material, **kwargs)
 
     @classmethod
     def get_mesh(
@@ -1023,6 +1047,9 @@ class MPMInitData(object):
         p_x = np.ascontiguousarray(p_x.reshape(-1, 3))
         return {'num_particles': p_x.shape[0], 'vol': vol, 'pos': p_x, 'center': center}
 
+    def set_env_id(self, env_id: int) -> None:
+        self.env_id = env_id
+
     def set_center(self, value: list | np.ndarray) -> None:
         self.pos = self.pos - self.center + np.array(value)
         self.center = np.array(value)
@@ -1101,8 +1128,8 @@ class MPMStaticsInitializer(StaticsInitializer):
         self.sections: list[int] = []
         self.vols: list[float] = []
         self.rhos: list[float] = []
-        self.clip_bounds: list[float] = []
 
+        self.env_ids: list[float] = []
         self.material_ids: list[int] = []
         self.materials: list[materials.MPMMaterial] = []
 
@@ -1113,17 +1140,17 @@ class MPMStaticsInitializer(StaticsInitializer):
 
         for i, group in enumerate(self.groups):
             self.sections.append(group.num_particles)
-
             self.vols.append(group.vol)
             self.rhos.append(group.rho)
-            self.clip_bounds.append(group.clip_bound)
+
+            self.env_ids.append(group.env_id)
             self.material_ids.append(i)
             self.materials.append(group.material)
 
         statics = super().finalize(shape=sum(self.sections))
         statics.update_vol(self.sections, self.vols)
         statics.update_rho(self.sections, self.rhos)
-        statics.update_clip_bound(self.sections, self.clip_bounds)
+        statics.update_env_id(self.sections, self.env_ids)
         statics.update_material(self.sections, self.material_ids, self.materials)
 
         return statics

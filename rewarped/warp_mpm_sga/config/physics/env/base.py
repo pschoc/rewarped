@@ -11,4 +11,3 @@ class BaseEnvConfig(Config):
     vel: BaseVelConfig
 
     rho: float = 1e3
-    clip_bound: float = 0.5
