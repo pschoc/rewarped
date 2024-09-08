@@ -529,6 +529,7 @@ class MPMModel(Model):
 
             # rigid body interaction
             v = MPMModel._grid_op_dexdeform_body(
+                env,
                 v,
                 gx,
                 constant,
@@ -562,6 +563,7 @@ class MPMModel(Model):
     @staticmethod
     @wp.func
     def _grid_op_dexdeform_body(
+        env: int,
         v_in: wp.vec3,
         gx: wp.vec3,
         constant: MPMConstant,
@@ -574,6 +576,9 @@ class MPMModel(Model):
         body_next: wp.array(dtype=wp.transform),
     ) -> wp.vec3:
 
+        X_wo = wp.transform(constant.env_offsets[env], wp.quat_identity())
+        X_ow = wp.transform_inverse(X_wo)
+
         v = wp.vec3f(v_in)
         for shape_index in range(shape_start, shape_end):
             body_index = shape_body[shape_index]
@@ -583,6 +588,10 @@ class MPMModel(Model):
             if body_index >= 0:
                 X_wb = body_curr[body_index]
                 X_wb_next = body_next[body_index]
+
+                # transform world frame to ignore env offset
+                X_wb = wp.transform_multiply(X_ow, X_wb)
+                X_wb_next = wp.transform_multiply(X_ow, X_wb_next)
 
             X_bs = shape_X_bs[shape_index]
 
