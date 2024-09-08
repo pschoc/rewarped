@@ -158,15 +158,15 @@ class MPMParticleData(object):
 @wp.struct
 class MPMGridData(object):
 
-    v: wp.array(dtype=wp.vec3, ndim=3)
-    mv: wp.array(dtype=wp.vec3, ndim=3)
-    m: wp.array(dtype=float, ndim=3)
+    v: wp.array(dtype=wp.vec3, ndim=4)
+    mv: wp.array(dtype=wp.vec3, ndim=4)
+    m: wp.array(dtype=float, ndim=4)
 
     def init(self, shape: ShapeLike, device: Devicelike = None, requires_grad: bool = False) -> None:
 
-        self.v = wp.zeros(shape=shape, dtype=wp.vec3, ndim=3, device=device, requires_grad=requires_grad)
-        self.mv = wp.zeros(shape=shape, dtype=wp.vec3, ndim=3, device=device, requires_grad=requires_grad)
-        self.m = wp.zeros(shape=shape, dtype=float, ndim=3, device=device, requires_grad=requires_grad)
+        self.v = wp.zeros(shape=shape, dtype=wp.vec3, ndim=4, device=device, requires_grad=requires_grad)
+        self.mv = wp.zeros(shape=shape, dtype=wp.vec3, ndim=4, device=device, requires_grad=requires_grad)
+        self.m = wp.zeros(shape=shape, dtype=float, ndim=4, device=device, requires_grad=requires_grad)
 
     def clear(self) -> None:
         self.v.zero_()
@@ -332,8 +332,7 @@ class MPMModel(Model):
         self.grid_op = None
         self.grid_op_name = None
 
-        # TODO: assumes parallel envs are stacked along +x dim only
-        shape = (self.constant.num_envs * self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
+        shape = (self.constant.num_envs, self.constant.num_grids, self.constant.num_grids, self.constant.num_grids)
         grid = MPMGridData()
         grid.init(shape, device, requires_grad)
         self.grid = grid
@@ -351,6 +350,7 @@ class MPMModel(Model):
         particle_next = state_next.particle
         grid = self.grid
 
+        num_envs = constant.num_envs
         num_grids = constant.num_grids
         num_particles = particle_curr.x.shape[0]
 
@@ -358,7 +358,7 @@ class MPMModel(Model):
         grid.zero_grad()
 
         wp.launch(self.p2g, dim=num_particles, inputs=[constant, statics, particle_curr, grid], device=device)
-        wp.launch(self.grid_op, dim=[num_grids] * 3, inputs=[constant, grid], device=device)
+        wp.launch(self.grid_op, dim=[num_envs] + [num_grids] * 3, inputs=[constant, grid], device=device)
 
         with CondTape(tape, self.requires_grad):
             wp.launch(self.g2p, dim=num_particles, inputs=[constant, statics, particle_curr, particle_next, grid], device=device)
@@ -370,6 +370,7 @@ class MPMModel(Model):
         particle_curr = state_curr.particle
         grid = self.grid
 
+        num_envs = constant.num_envs
         num_grids = constant.num_grids
         num_particles = particle_curr.x.shape[0]
 
@@ -379,7 +380,7 @@ class MPMModel(Model):
         local_tape = Tape()
         with local_tape:
             wp.launch(self.p2g, dim=num_particles, inputs=[constant, statics, particle_curr, grid], device=device)
-            wp.launch(self.grid_op, dim=[num_grids] * 3, inputs=[constant, grid], device=device)
+            wp.launch(self.grid_op, dim=[num_envs] + [num_grids] * 3, inputs=[constant, grid], device=device)
 
         tape.backward()
 
@@ -395,9 +396,10 @@ class MPMModel(Model):
 
         p = wp.tid()
 
+        env = statics.env_id[p]
         p_mass = statics.vol[p] * statics.rho[p]
 
-        p_x = particle_curr.x[p] * constant.inv_dx
+        p_x = (particle_curr.x[p] - constant.env_offsets[env]) * constant.inv_dx
         base_x = int(p_x[0] - 0.5)
         base_y = int(p_x[1] - 0.5)
         base_z = int(p_x[2] - 0.5)
@@ -431,8 +433,8 @@ class MPMModel(Model):
                     mv = weight * (p_mass * particle_curr.v[p] + affine * dpos)
                     m = weight * p_mass
 
-                    wp.atomic_add(grid.mv, base_x + i, base_y + j, base_z + k, mv)
-                    wp.atomic_add(grid.m, base_x + i, base_y + j, base_z + k, m)
+                    wp.atomic_add(grid.mv[env], base_x + i, base_y + j, base_z + k, mv)
+                    wp.atomic_add(grid.m[env], base_x + i, base_y + j, base_z + k, m)
 
     @staticmethod
     @wp.kernel
@@ -440,11 +442,11 @@ class MPMModel(Model):
             constant: ConstantType,
             grid: MPMGridData) -> None:
 
-        px, py, pz = wp.tid()
+        env, px, py, pz = wp.tid()
 
         v = wp.vec3(0.0)
-        if grid.m[px, py, pz] > 0.0:
-            v = grid.mv[px, py, pz] / (grid.m[px, py, pz] + constant.eps) + constant.gravity * constant.dt
+        if grid.m[env, px, py, pz] > 0.0:
+            v = grid.mv[env, px, py, pz] / (grid.m[env, px, py, pz] + constant.eps) + constant.gravity * constant.dt
         else:
             v = constant.gravity * constant.dt
 
@@ -461,7 +463,7 @@ class MPMModel(Model):
         if pz > constant.num_grids - constant.bound and v[2] > 0.0:
             v = wp.vec3(v[0], v[1], 0.0)
 
-        grid.v[px, py, pz] = v
+        grid.v[env, px, py, pz] = v
 
     @staticmethod
     @wp.kernel
@@ -469,11 +471,11 @@ class MPMModel(Model):
             constant: ConstantType,
             grid: MPMGridData) -> None:
 
-        px, py, pz = wp.tid()
+        env, px, py, pz = wp.tid()
 
         v = wp.vec3(0.0)
-        if grid.m[px, py, pz] > 0.0:
-            v = grid.mv[px, py, pz] / (grid.m[px, py, pz] + constant.eps) + constant.gravity * constant.dt
+        if grid.m[env, px, py, pz] > 0.0:
+            v = grid.mv[env, px, py, pz] / (grid.m[env, px, py, pz] + constant.eps) + constant.gravity * constant.dt
         else:
             v = constant.gravity * constant.dt
 
@@ -490,7 +492,7 @@ class MPMModel(Model):
         if pz > constant.num_grids - constant.bound and v[2] > 0.0:
             v = wp.vec3(0.0)
 
-        grid.v[px, py, pz] = v
+        grid.v[env, px, py, pz] = v
 
     @staticmethod
     @wp.kernel
@@ -505,14 +507,13 @@ class MPMModel(Model):
         body_next: wp.array(dtype=wp.transform),
     ) -> None:
 
-        env_id, ex, py, pz = wp.tid()
-        px = constant.num_grids * env_id + ex  # TODO: assumes parallel envs are stacked along +x dim only
+        env, px, py, pz = wp.tid()
 
         v = wp.vec3(0.0)
-        if (grid.m[px, py, pz] > constant.eps):
+        if (grid.m[env, px, py, pz] > constant.eps):
 
             # normalization
-            v = grid.mv[px, py, pz] * (1.0 / grid.m[px, py, pz])
+            v = grid.mv[env, px, py, pz] * (1.0 / grid.m[env, px, py, pz])
 
             # gravity
             v = v + constant.gravity * constant.dt
@@ -523,7 +524,7 @@ class MPMModel(Model):
                 float(pz) * constant.dx,
             )
 
-            shape_start = env_id * num_shapes_per_env
+            shape_start = env * num_shapes_per_env
             shape_end = shape_start + num_shapes_per_env
 
             # rigid body interaction
@@ -541,13 +542,13 @@ class MPMModel(Model):
             )
 
             # boundary condition
-            if ex < constant.bound and v[0] < 0.0:
+            if px < constant.bound and v[0] < 0.0:
                 v = wp.vec3(0.0, v[1], v[2])
             if py < constant.bound and v[1] < 0.0:
                 v = wp.vec3(v[0], 0.0, v[2])
             if pz < constant.bound and v[2] < 0.0:
                 v = wp.vec3(v[0], v[1], 0.0)
-            if ex > constant.num_grids - constant.bound and v[0] > 0.0:
+            if px > constant.num_grids - constant.bound and v[0] > 0.0:
                 v = wp.vec3(0.0, v[1], v[2])
             if py > constant.num_grids - constant.bound and v[1] > 0.0:
                 v = wp.vec3(v[0], 0.0, v[2])
@@ -556,7 +557,7 @@ class MPMModel(Model):
 
             # TODO: ground_friction
 
-        grid.v[px, py, pz] = v
+        grid.v[env, px, py, pz] = v
 
     @staticmethod
     @wp.func
@@ -667,7 +668,8 @@ class MPMModel(Model):
 
         p = wp.tid()
 
-        p_x = particle_curr.x[p] * constant.inv_dx
+        env = statics.env_id[p]
+        p_x = (particle_curr.x[p] - constant.env_offsets[env]) * constant.inv_dx
         base_x = int(p_x[0] - 0.5)
         base_y = int(p_x[1] - 0.5)
         base_z = int(p_x[2] - 0.5)
@@ -699,7 +701,7 @@ class MPMModel(Model):
                     dpos = (offset - f_x) * constant.dx
                     weight = w[0, i] * w[1, j] * w[2, k]
 
-                    v = grid.v[base_x + i, base_y + j, base_z + k]
+                    v = grid.v[env, base_x + i, base_y + j, base_z + k]
                     new_v = new_v + weight * v
                     new_C = new_C + (4.0 * weight * constant.inv_dx * constant.inv_dx) * wp.outer(v, dpos)
 
@@ -709,11 +711,12 @@ class MPMModel(Model):
 
         bound = constant.clip_bound * constant.dx
         new_x = particle_curr.x[p] + constant.dt * new_v
-        # TODO: assumes parallel envs are stacked along +x dim only
+        lo = constant.lower_lim + constant.env_offsets[env]
+        up = constant.upper_lim + constant.env_offsets[env]
         new_x = wp.vec3(
-            wp.clamp(new_x[0], 0.0 + bound, 1.0 * float(constant.num_envs) - bound),
-            wp.clamp(new_x[1], 0.0 + bound, 1.0 - bound),
-            wp.clamp(new_x[2], 0.0 + bound, 1.0 - bound),
+            wp.clamp(new_x[0], lo[0] + bound, up[0] - bound),
+            wp.clamp(new_x[1], lo[1] + bound, up[1] - bound),
+            wp.clamp(new_x[2], lo[2] + bound, up[2] - bound),
         )
         particle_next.x[p] = new_x
 

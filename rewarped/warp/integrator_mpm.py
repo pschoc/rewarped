@@ -36,7 +36,7 @@ class MPMIntegrator(Integrator):
         if grid_op_name == "dexdeform":
             wp.launch(
                 kernel=mpm_model.grid_op,
-                dim=[num_envs] + [num_grids] * 3,  # TODO: assumes parallel envs are stacked along +x dim only
+                dim=[num_envs] + [num_grids] * 3,
                 inputs=[
                     constant,
                     grid,
