@@ -17,7 +17,7 @@ class MPMWarpEnvMixin:
     def create_modelbuilder_mpm(self, builder):
         mpm_builder = MPMModelBuilder()
         self.mpm_cfg = self.create_cfg_mpm(EvalConfig(path=None))
-        mpm_builder.parse_cfg(self.mpm_cfg.physics.sim, num_envs=self.num_envs)
+        mpm_builder.parse_cfg(self.mpm_cfg.physics.sim, num_envs=self.num_envs, env_offsets=self.env_offsets)
         mpm_builder.model = mpm_builder.finalize(self.device, requires_grad=self.requires_grad)
         mpm_builder.state_initializer = MPMStateInitializer(mpm_builder.model)
         mpm_builder.statics_initializer = MPMStaticsInitializer(mpm_builder.model)
@@ -26,18 +26,19 @@ class MPMWarpEnvMixin:
 
     def create_builder_mpm(self, builder):
         mpm_builder = self.create_modelbuilder_mpm(builder)
-        for offset in self.env_offsets:
-            self.create_env_mpm(builder, mpm_builder, offset)
+        for env_id, offset in enumerate(self.env_offsets):
+            self.create_env_mpm(builder, mpm_builder, env_id, offset)
         return mpm_builder
 
-    def create_env_mpm(self, builder, mpm_builder, offset):
+    def create_env_mpm(self, builder, mpm_builder, env_id, offset):
         init_data = MPMInitData.get(self.mpm_cfg.physics.env)
         center = self.mpm_cfg.physics.env.shape.center + offset
         lin_vel = self.mpm_cfg.physics.env.vel.lin_vel
         ang_vel = self.mpm_cfg.physics.env.vel.ang_vel
-        self.create_obj_mpm(mpm_builder, init_data, center, lin_vel, ang_vel)
+        self.create_obj_mpm(mpm_builder, env_id, init_data, center, lin_vel, ang_vel)
 
-    def create_obj_mpm(self, mpm_builder, init_data, center, lin_vel, ang_vel):
+    def create_obj_mpm(self, mpm_builder, env_id, init_data, center, lin_vel, ang_vel):
+        init_data.set_env_id(env_id)
         init_data.set_center(center)
         init_data.set_lin_vel(lin_vel)
         init_data.set_ang_vel(ang_vel)
