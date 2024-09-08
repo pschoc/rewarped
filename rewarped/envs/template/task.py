@@ -21,6 +21,7 @@ class Task(WarpEnv):
     sim_substeps_featherstone = 16
     featherstone_settings = dict(angular_damping=0.0, update_mass_matrix_every=sim_substeps_featherstone)
 
+    frame_dt = 1.0 / 60.0
     up_axis = "Z"
     ground_plane = True
 
