@@ -864,12 +864,8 @@ class MPMInitData(object):
         else:
             raise ValueError('invalid shape type: {}'.format(cfg['shape']['type']))
 
-        E = cfg['physics'].get('E', None)
-        if 'youngs_modulus_log' in cfg['physics']:
-            E = np.exp(cfg['physics']['youngs_modulus_log'])
-        nu = cfg['physics'].get('nu', None)
-        if 'poissons_ratio' in cfg['physics']:
-            nu = cfg['physics']['poissons_ratio']
+        E = cfg['physics'].get('E', cfg['physics'].get('youngs_modulus', None))
+        nu = cfg['physics'].get('nu', cfg['physics'].get('poissons_ratio', None))
         yield_stress = cfg['physics'].get('yield_stress', None)
         cohesion = cfg['physics'].get('cohesion', None)
         alpha = cfg['physics'].get('alpha', None)
