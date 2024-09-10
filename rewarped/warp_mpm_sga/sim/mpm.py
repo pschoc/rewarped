@@ -741,6 +741,10 @@ class MPMModel(Model):
         m = statics.material_id[p]
         material = statics.material[m]
 
+        if material.name == materials.MATL_PLBPLASTICINE:  # PlasticineLab
+            particle.F[p] = materials.plasticine_deformation(particle.F_trial[p], material)
+            particle.stress[p] = materials.corotated_elasticity(particle.F[p], material)
+
         if material.name == materials.MATL_PLASTICINE:
             particle.F[p] = materials.plasticine_deformation(particle.F_trial[p], material)
             particle.stress[p] = materials.sigma_elasticity(particle.F[p], material)

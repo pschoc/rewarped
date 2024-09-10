@@ -156,9 +156,12 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         def update_plasticine_params():
             E, nu = self.dexdeform_cfg.SIMULATOR.E, self.dexdeform_cfg.SIMULATOR.nu
             yield_stress = self.dexdeform_cfg.SIMULATOR.yield_stress
+            rho = 1.0
+            mpm_cfg.update(["--physics.env.physics", "plb_plasticine"])
             mpm_cfg.update(["--physics.env.physics.E", str(E)])
             mpm_cfg.update(["--physics.env.physics.nu", str(nu)])
             mpm_cfg.update(["--physics.env.physics.yield_stress", str(yield_stress)])
+            mpm_cfg.update(["--physics.env.rho", str(rho)])
 
         if self.task_name == "lift":
             # update_plasticine_params()
@@ -172,7 +175,7 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             mpm_cfg.update(["--physics.env.shape.resolution", str(resolution)])
             # TODO: change resolution based on num_particles
         elif self.task_name == "flip":
-            # update_plasticine_params()
+            update_plasticine_params()
 
             mpm_cfg.update(["--physics.env.shape", "cylinder_dexdeform"])
             # mpm_cfg.update(["--physics.env.shape.num_particles", str(self.dexdeform_cfg.SIMULATOR.n_particles)])

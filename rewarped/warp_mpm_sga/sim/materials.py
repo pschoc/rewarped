@@ -1,11 +1,12 @@
 import warp as wp
 
 
-MATL_PLASTICINE = wp.constant(0)
-MATL_WATER = wp.constant(1)
-MATL_SAND = wp.constant(2)
-MATL_NEOHOOKEAN = wp.constant(3)
-MATL_COROTATED = wp.constant(4)
+MATL_PLBPLASTICINE = wp.constant(0)
+MATL_PLASTICINE = wp.constant(1)
+MATL_WATER = wp.constant(2)
+MATL_SAND = wp.constant(3)
+MATL_NEOHOOKEAN = wp.constant(4)
+MATL_COROTATED = wp.constant(5)
 
 
 @wp.struct
@@ -31,7 +32,7 @@ def get_material(
         alpha: float = None,
 ) -> MPMMaterial:
     material = MPMMaterial()
-    if name == 'plasticine':
+    if name in ('plb_plasticine', 'plasticine'):
         material.name = MATL_PLASTICINE
         material.E = E
         material.nu = nu
@@ -107,7 +108,7 @@ def identity_deformation(F_trial: wp.mat33, material: MPMMaterial):
 
 
 @wp.func
-def plasticine_deformation(F_trial: wp.mat33, material: MPMMaterial):  # von_mises
+def plasticine_deformation(F_trial: wp.mat33, material: MPMMaterial):  # von mises
     U, sigma, Vh = svd(F_trial)
 
     threshold = 0.01
