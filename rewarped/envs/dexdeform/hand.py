@@ -306,18 +306,21 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                 self.renderer.begin_frame(self.render_time)
                 # render state 1 (swapped with state 0 just before)
                 self.renderer.render(state or self.state_1)
-
-                # render mpm particles
-                particle_q = self.state.mpm_x
-                if isinstance(particle_q, torch.Tensor):
-                    particle_q = particle_q.detach().cpu().numpy()
-                else:
-                    particle_q = particle_q.numpy()
-                particle_radius = 7.5e-3
-                particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
-                self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
-
+                self.render_mpm(state=state)
                 self.renderer.end_frame()
+
+    def render_mpm(self, state=None):
+        state = state or self.state_1
+
+        # render mpm particles
+        particle_q = state.mpm_x
+        if isinstance(particle_q, torch.Tensor):
+            particle_q = particle_q.detach().cpu().numpy()
+        else:
+            particle_q = particle_q.numpy()
+        particle_radius = 7.5e-3
+        particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
+        self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
 
     def get_demo_actions(self, demo_file):
         demo = load_demo(demo_file)
