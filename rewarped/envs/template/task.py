@@ -54,6 +54,9 @@ class Task(WarpEnv):
             self.joint_act = wp.to_torch(self.model.joint_act).view(self.num_envs, -1).clone()
             self.joint_act_indices = ...
 
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+
     @torch.no_grad()
     def randomize_init(self, env_ids):
         pass
