@@ -83,6 +83,7 @@ class WarpEnv(Environment):
           Environment.init() ->
             Environment.create_env() ->
               Environment.create_articulation()  # create objects in the scene
+          WarpEnv.allocate_buffers()
           WarpEnv.init_sim()
       WarpEnv.reset_idx()
         -> WarpEnv.randomize_init()
@@ -225,8 +226,10 @@ class WarpEnv(Environment):
         # ---- Init simulation
         wp.set_device(self.device)
         super().init()
+        self.allocate_buffers()
         self.init_sim()
 
+    def allocate_buffers(self):
         # Allocate buffers
         self.obs_buf = torch.zeros(
             (self.num_envs, self.num_obs),
