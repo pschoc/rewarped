@@ -543,15 +543,17 @@ class MPMModel(Model):
                 body_next,
             )
 
+            # TODO: ground friction assumes up_axis='y'
+            up_v = v[1]
+            hit_ground = py < constant.bound and up_v < 0.0
+            if constant.ground_friction > 0.0 and hit_ground:
+                v = v * wp.max(1.0 + constant.ground_friction * up_v / (wp.length(v) + 1e-30), 0.0)
+
             # boundary condition
             if px < constant.bound and v[0] < 0.0:
                 v = wp.vec3(0.0, v[1], v[2])
             if py < constant.bound and v[1] < 0.0:
-                lin = v[1]
                 v = wp.vec3(v[0], 0.0, v[2])
-                # TODO: ground friction assumes up_axis='y'
-                if constant.ground_friction > 0.0:
-                    v = v * wp.max(1.0 + constant.ground_friction * lin / wp.length(v), 0.0)
             if pz < constant.bound and v[2] < 0.0:
                 v = wp.vec3(v[0], v[1], 0.0)
             if px > constant.num_grids - constant.bound and v[0] > 0.0:
