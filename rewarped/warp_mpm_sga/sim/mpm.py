@@ -1074,8 +1074,9 @@ class MPMInitData(object):
                     rng=rng,
                 )
 
-                p_x_mirror = p_x * np.array([-1, 1, 1])
-                p_x = np.stack([p_x, p_x_mirror], axis=0)
+                p_x = p_x[np.lexsort((p_x[:, 1], p_x[:, 0], p_x[:, 2]))]
+                p_x_mirror = p_x * np.array([1, 1, -1])
+                p_x = np.concatenate([p_x, p_x_mirror])
             else:
                 raise ValueError('invalid mode: {}'.format(mode))
 

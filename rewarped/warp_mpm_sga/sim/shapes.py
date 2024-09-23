@@ -16,8 +16,10 @@ def compute_cylinder_sdf(h, r, half=False):
         d = np.abs(np.stack([length(vec_xz), y], axis=1)) - rh
 
         if half:
-            half_mask = x >= 0
-            d[~half_mask, 0] = length(np.stack([x[~half_mask], np.maximum(z[~half_mask] - r, 0)], axis=1))
+            mask = z < 0
+            half_x, half_z = np.maximum(x[mask] - r, 0), z[mask]
+            half_vec_xz = np.stack([half_x, half_z], axis=1)
+            d[mask, 0] = length(half_vec_xz)
 
         return np.minimum(np.maximum(d[:, 0], d[:, 1]), 0.0) + length(np.maximum(d, 0.0))
 

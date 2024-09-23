@@ -219,6 +219,7 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
     def reset_idx(self, env_ids):
         super().reset_idx(env_ids)
         with torch.no_grad():
+            self.init_dist = self.init_dist.clone()
             self.init_dist[env_ids] = 1.0
 
     @torch.no_grad()
@@ -277,8 +278,8 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
         if self.task_name == "lift":
             rew = com_q[:, 1]  # maximize height
         elif self.task_name == "flip":
-            half0_points, half1_points = particle_q[:, self.half0_indices, :], particle_q[:, self.half1_indices, :]
-            dist = torch.linalg.norm(half0_points - half1_points, dim=-1).mean(dim=-1)
+            half0_q, half1_q = particle_q[:, self.half0_indices, :], particle_q[:, self.half1_indices, :]
+            dist = torch.linalg.norm(half0_q - half1_q, dim=-1).mean(dim=-1)
 
             first_mask = self.progress_buf == 1
             if first_mask.any():
@@ -310,6 +311,7 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                 # render state 1 (swapped with state 0 just before)
                 self.renderer.render(state or self.state_1)
                 self.render_mpm(state=state)
+                # self.render_mpm_halves(state=state)
                 self.renderer.end_frame()
 
     def render_mpm(self, state=None):
@@ -317,13 +319,30 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
 
         # render mpm particles
         particle_q = state.mpm_x
-        if isinstance(particle_q, torch.Tensor):
-            particle_q = particle_q.detach().cpu().numpy()
-        else:
-            particle_q = particle_q.numpy()
+        particle_q = particle_q.numpy()
         particle_radius = 7.5e-3
         particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
         self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
+
+    def render_mpm_halves(self, state=None):
+        state = state or self.state_1
+
+        # render mpm particles
+        particle_q = state.mpm_x
+        particle_q = particle_q.numpy()
+        particle_q = particle_q.reshape(self.num_envs, -1, 3)
+
+        N = particle_q.shape[1] // 2
+        half0_q, half1_q = particle_q[:, :N, :], particle_q[:, N:, :]
+        half0_q, half1_q = half0_q[:, ::4, :], half1_q[:, ::4, :]
+
+        half0_q, half1_q = half0_q.reshape(-1, 3), half1_q.reshape(-1, 3)
+
+        particle_radius = 7.5e-3
+        half0_color = (0.0, 1.0, 0.0)
+        half1_color = (0.0, 0.0, 1.0)
+        self.renderer.render_points("half0_q", half0_q, radius=particle_radius, colors=half0_color)
+        self.renderer.render_points("half1_q", half1_q, radius=particle_radius, colors=half1_color)
 
     def get_demo_actions(self, demo_file):
         demo = load_demo(demo_file)
@@ -356,14 +375,16 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             actions = self.get_demo_actions(demo_file)
         else:
             actions = [
-                # torch.rand(self.num_envs, self.num_actions, device=self.device, requires_grad=True)
-                torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=True)
+                # torch.rand((self.num_envs, self.num_actions), device=self.device) * 2.0 - 1.0
+                torch.zeros((self.num_envs, self.num_actions), device=self.device)
                 for _ in range(self.episode_length)
             ]
 
         if self.RUN_TRAJ_OPT:
             iters = 50
-            train_rate = 0.1
+            # train_rate = 0.1
+            train_rate = 1e-2
+            actions = [a.requires_grad_() for a in actions]
             opt = torch.optim.Adam(actions, lr=train_rate)
         else:
             iters = 2
