@@ -22,6 +22,20 @@ from . import materials
 from . import shapes
 
 
+@wp.func
+def normalize_transform(t: wp.transform):
+    p = wp.transform_get_translation(t)
+    q = wp.transform_get_rotation(t)
+    return wp.transform(p, wp.normalize(q))
+
+
+@wp.func
+def transform_point_inv(t: wp.transform, point: wp.vec3):
+    p = wp.transform_get_translation(t)
+    q = wp.transform_get_rotation(t)
+    return wp.quat_rotate_inv(q, point - p)
+
+
 @wp.struct
 class MPMStatics(Statics):
 
@@ -547,7 +561,10 @@ class MPMModel(Model):
             up_v = v[1]
             hit_ground = py < constant.bound and up_v < 0.0
             if constant.ground_friction > 0.0 and hit_ground:
-                v = v * wp.max(1.0 + constant.ground_friction * up_v / (wp.length(v) + 1e-30), 0.0)
+                if constant.ground_friction < 99.:
+                    v = v * wp.max(1.0 + constant.ground_friction * up_v / (wp.length(v) + 1e-30), 0.0)
+                else:
+                    v = wp.vec3(0.0) 
 
             # boundary condition
             if px < constant.bound and v[0] < 0.0:
@@ -600,11 +617,12 @@ class MPMModel(Model):
 
             X_bs = shape_X_bs[shape_index]
 
-            X_ws = wp.transform_multiply(X_wb, X_bs)
-            X_sw = wp.transform_inverse(X_ws)
+            # normalize quaternion to deal with numerical errors
+            X_ws = normalize_transform(wp.transform_multiply(X_wb, X_bs))
+            X_ws_next = normalize_transform(wp.transform_multiply(X_wb_next, X_bs))
 
             # transform particle position to shape local space
-            x_local = wp.transform_point(X_sw, gx)
+            x_local = transform_point_inv(X_ws, gx)
 
             # geo description
             geo_type = body_geo.type[shape_index]
@@ -658,7 +676,7 @@ class MPMModel(Model):
             influence = wp.min(wp.exp(-dist * softness), 1.)
 
             if (influence > 0.1) or (dist <= 0):
-                bv = (wp.transform_point(X_wb_next, wp.transform_point(X_bs, x_local)) - gx) / constant.dt
+                bv = (wp.transform_point(X_ws_next, x_local) - gx) / constant.dt
                 rel_v = v - bv
 
                 normal_component = wp.dot(rel_v, normal)
