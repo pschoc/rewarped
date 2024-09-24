@@ -538,7 +538,7 @@
         <child link="LF_HIP"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-0.72" upper="0.49"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -595,7 +595,7 @@
         <child link="LF_THIGH"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -658,7 +658,7 @@
         <child link="LF_SHANK"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -750,7 +750,7 @@
         <child link="RF_HIP"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-0.49" upper="0.72"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -807,7 +807,7 @@
         <child link="RF_THIGH"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="-1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -870,7 +870,7 @@
         <child link="RF_SHANK"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="-1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -962,7 +962,7 @@
         <child link="LH_HIP"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="-1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-0.72" upper="0.49"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -1019,7 +1019,7 @@
         <child link="LH_THIGH"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -1082,7 +1082,7 @@
         <child link="LH_SHANK"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -1175,7 +1175,7 @@
         <child link="RH_HIP"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="-1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-0.49" upper="0.72"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -1232,7 +1232,7 @@
         <child link="RH_THIGH"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="-1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
@@ -1295,7 +1295,7 @@
         <child link="RH_SHANK"/>
         <origin rpy="0 0 0" xyz="0 0 0"/>
         <axis xyz="-1 0 0"/>
-        <limit effort="80.0" velocity="20." />
+        <limit effort="80.0" velocity="20." lower="-9.42478" upper="9.42478"/>
         <dynamics damping="0.0" friction="0.0"/>
     </joint>
     <!-- Drive output link -->
