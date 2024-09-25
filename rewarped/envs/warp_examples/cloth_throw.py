@@ -135,10 +135,7 @@ class ClothThrow(WarpEnv):
         rew = -1.0 * loss
 
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
-        max_episode_steps, early_termination = (
-            self.episode_length,
-            self.early_termination,
-        )
+        max_episode_steps, early_termination = self.episode_length, self.early_termination
         truncated = progress_buf > max_episode_steps - 1
         reset = torch.where(truncated, torch.ones_like(reset_buf), reset_buf)
         if early_termination:

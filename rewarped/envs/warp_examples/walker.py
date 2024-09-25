@@ -58,13 +58,7 @@ class Walker(WarpEnv):
     state_tensors_names = ("particle_q", "particle_qd")
     control_tensors_names = ("tet_activations",)
 
-    def __init__(
-        self,
-        num_envs=8,
-        episode_length=300,
-        early_termination=False,
-        **kwargs,
-    ):
+    def __init__(self, num_envs=8, episode_length=300, early_termination=False, **kwargs):
         # bear
         full_num_obs = 1986  # model.particle_count
         full_num_act = 5354  # model.tet_count
@@ -227,10 +221,7 @@ class Walker(WarpEnv):
         rew = -loss
 
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
-        max_episode_steps, early_termination = (
-            self.episode_length,
-            self.early_termination,
-        )
+        max_episode_steps, early_termination = self.episode_length, self.early_termination
         truncated = progress_buf > max_episode_steps - 1
         reset = torch.where(truncated, torch.ones_like(reset_buf), reset_buf)
         if early_termination:
