@@ -124,6 +124,7 @@ class WarpEnv(Environment):
         no_grad=False,
         render=False,
         render_mode="usd",
+        no_env_offset=False,
         device="cuda:0",
         use_graph_capture=True,
         synchronize=False,
@@ -132,11 +133,11 @@ class WarpEnv(Environment):
     ):
         super().__init__()
         # Environment parameters
-        self.visualize = render
         if render_mode is not None:
             self.render_mode = RenderMode(render_mode) if render else RenderMode.NONE
-        # if self.render_mode == RenderMode.NONE:
-        #     self.env_offset = (0.0, 0.0, 0.0)  # set to zero for training for numerical consistency
+        if self.render_mode == RenderMode.NONE and no_env_offset:
+            print("Setting env_offset to zero")
+            self.env_offset = (0.0, 0.0, 0.0)  # set to zero for training for numerical consistency
         self.num_envs = num_envs
         self.no_grad = no_grad
         self.device = device
@@ -644,7 +645,7 @@ class WarpEnv(Environment):
 
             obs, reward, done, info = self.step(action)
 
-            if not self.requires_grad:
+            if self.max_iter <= 2:
                 print(i, "/", self.episode_length)
 
             obses.append(obs)
