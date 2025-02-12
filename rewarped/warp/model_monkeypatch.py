@@ -56,7 +56,7 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
         if self.body_count:
             # joints
             s.joint_qdd = wp.zeros_like(self.joint_qd, requires_grad=requires_grad)
-            s.joint_tau = wp.empty_like(self.joint_qd, requires_grad=requires_grad)
+            s.joint_tau = wp.zeros_like(self.joint_qd, requires_grad=requires_grad)
             if requires_grad:
                 # used in the custom grad implementation of eval_dense_solve_batched
                 s.joint_solve_tmp = wp.zeros_like(self.joint_qd, requires_grad=True)
@@ -70,22 +70,13 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
             )
 
             # derived rigid body data (maximal coordinates)
-            s.body_q_com = wp.empty_like(self.body_q, requires_grad=requires_grad)
-            s.body_I_s = wp.empty(
-                (self.body_count,), dtype=wp.spatial_matrix, device=self.device, requires_grad=requires_grad
-            )
-            s.body_v_s = wp.empty(
-                (self.body_count,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad
-            )
-            s.body_a_s = wp.empty(
-                (self.body_count,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad
-            )
-            s.body_f_s = wp.zeros(
-                (self.body_count,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad
-            )
-            s.body_ft_s = wp.zeros(
-                (self.body_count,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad
-            )
+            B = self.body_count
+            s.body_q_com = wp.empty((B,), dtype=wp.transform, device=self.device, requires_grad=requires_grad)
+            s.body_I_s = wp.empty((B,), dtype=wp.spatial_matrix, device=self.device, requires_grad=requires_grad)
+            s.body_v_s = wp.empty((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
+            s.body_a_s = wp.empty((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
+            s.body_f_s = wp.zeros((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
+            s.body_ft_s = wp.zeros((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
 
         # allocate mass, Jacobian matrices, and other auxiliary variables pertaining to the model
         if self.joint_count:
