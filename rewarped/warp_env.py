@@ -556,6 +556,28 @@ class WarpEnv(Environment):
     def compute_reward(self):
         raise NotImplementedError
 
+    def check_nans(self):
+        # TODO: put this inside torch.jit.script
+        nan_masks = torch.zeros_like(self.reset_buf)
+        nan_masks = torch.logical_or(nan_masks, torch.isnan(self.rew_buf))
+        obs_buf = self.obs_buf
+        if not isinstance(self.obs_buf, dict):
+            obs_buf = {"obs": self.obs_buf}
+        for k, v in obs_buf.items():
+            v = v.view(self.num_envs, -1)
+            nan_masks = torch.logical_or(nan_masks, torch.isnan(v).any(1))
+            nan_masks = torch.logical_or(nan_masks, torch.isinf(v).any(1))
+            nan_masks = torch.logical_or(nan_masks, (torch.abs(v) > 1e6).any(1))
+        if torch.any(nan_masks):
+            self.reset_buf = torch.where(nan_masks, torch.ones_like(self.reset_buf), self.reset_buf)
+            self.rew_buf = torch.where(nan_masks, torch.zeros_like(self.rew_buf), self.rew_buf)
+
+            for k, v in obs_buf.items():
+                obs_buf[k] = torch.where(nan_masks[:, None], torch.zeros_like(v), v)
+
+        if not isinstance(self.obs_buf, dict):
+            self.obs_buf = obs_buf["obs"]
+
     def run_cfg(self):
         iters = 2
         opt = None
