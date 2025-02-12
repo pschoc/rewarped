@@ -17,6 +17,12 @@ from .warp.model import ModelBuilder
 
 wp.sim.ModelBuilder = ModelBuilder
 
+from .warp.model import SDF, JointAxis, Mesh
+
+wp.sim.JointAxis = JointAxis
+wp.sim.SDF = SDF
+wp.sim.Mesh = Mesh
+
 from .warp.integrator_featherstone import FeatherstoneIntegrator
 
 wp.sim.FeatherstoneIntegrator = FeatherstoneIntegrator
