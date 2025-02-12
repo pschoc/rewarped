@@ -150,12 +150,13 @@ class WarpEnv(Environment):
             faulthandler.enable()
 
             options = {
-                "verify_fp": True,
+                # "verify_fp": True,
                 "verify_cuda": True,
                 "print_launches": True,
-                "mode": "debug",
                 "verbose": True,
                 "verbose_warnings": True,
+                "verify_autograd_array_access": True,
+                "mode": "debug",
                 # "kernel_cache_dir": None,  # TODO: expects str
                 "enable_backward": self.requires_grad,
                 "max_unroll": max_unroll,
