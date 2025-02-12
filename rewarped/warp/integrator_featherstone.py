@@ -434,7 +434,7 @@ def jcalc_tau(
     ang_axis_count: int,
     body_f_s: wp.spatial_vector,
     # outputs
-    tau: wp.array(dtype=float),
+    joint_tau: wp.array(dtype=float),
 ):
     if type == wp.sim.JOINT_PRISMATIC or type == wp.sim.JOINT_REVOLUTE:
         S_s = joint_S_s[dof_start]
@@ -457,7 +457,7 @@ def jcalc_tau(
             q, qd, act, target_ke, target_kd, lower, upper, limit_ke, limit_kd, mode
         )
 
-        tau[dof_start] = t
+        joint_tau[dof_start] = t
 
         return
 
@@ -471,14 +471,18 @@ def jcalc_tau(
             # w = joint_qd[dof_start + i]
             # r = joint_q[coord_start + i]
 
-            tau[dof_start + i] = -wp.dot(S_s, body_f_s)  # - w * target_kd - r * target_ke
+            t = -wp.dot(S_s, body_f_s)  # - w * target_kd - r * target_ke
+
+            joint_tau[dof_start + i] = t
 
         return
 
     if type == wp.sim.JOINT_FREE or type == wp.sim.JOINT_DISTANCE:
         for i in range(6):
             S_s = joint_S_s[dof_start + i]
-            tau[dof_start + i] = -wp.dot(S_s, body_f_s)
+            t = -wp.dot(S_s, body_f_s)
+
+            joint_tau[dof_start + i] = t
 
         return
 
@@ -505,7 +509,7 @@ def jcalc_tau(
             # total torque / force on the joint
             t = -wp.dot(S_s, body_f_s) + f
 
-            tau[dof_start + i] = t
+            joint_tau[dof_start + i] = t
 
         return
 
@@ -647,7 +651,8 @@ def jcalc_integrate(
 
 @wp.func
 def compute_link_transform(
-    i: int,
+    start: int,
+    end: int,
     joint_type: wp.array(dtype=int),
     joint_parent: wp.array(dtype=int),
     joint_child: wp.array(dtype=int),
@@ -663,40 +668,41 @@ def compute_link_transform(
     body_q: wp.array(dtype=wp.transform),
     body_q_com: wp.array(dtype=wp.transform),
 ):
-    # parent transform
-    parent = joint_parent[i]
-    child = joint_child[i]
+    for i in range(start, end):
+        # parent transform
+        parent = joint_parent[i]
+        child = joint_child[i]
 
-    # parent transform in spatial coordinates
-    X_pj = joint_X_p[i]
-    X_cj = joint_X_c[i]
-    # parent anchor frame in world space
-    X_wpj = X_pj
-    if parent >= 0:
-        X_wp = body_q[parent]
-        X_wpj = X_wp * X_wpj
+        # parent transform in spatial coordinates
+        X_pj = joint_X_p[i]
+        X_cj = joint_X_c[i]
+        # parent anchor frame in world space
+        X_wpj = X_pj
+        if parent >= 0:
+            X_wp = body_q[parent]
+            X_wpj = X_wp * X_wpj
 
-    type = joint_type[i]
-    axis_start = joint_axis_start[i]
-    lin_axis_count = joint_axis_dim[i, 0]
-    ang_axis_count = joint_axis_dim[i, 1]
-    coord_start = joint_q_start[i]
+        type = joint_type[i]
+        axis_start = joint_axis_start[i]
+        lin_axis_count = joint_axis_dim[i, 0]
+        ang_axis_count = joint_axis_dim[i, 1]
+        coord_start = joint_q_start[i]
 
-    # compute transform across joint
-    X_j = jcalc_transform(type, joint_axis, axis_start, lin_axis_count, ang_axis_count, joint_q, coord_start)
+        # compute transform across joint
+        X_j = jcalc_transform(type, joint_axis, axis_start, lin_axis_count, ang_axis_count, joint_q, coord_start)
 
-    # transform from world to joint anchor frame at child body
-    X_wcj = X_wpj * X_j
-    # transform from world to child body frame
-    X_wc = X_wcj * wp.transform_inverse(X_cj)
+        # transform from world to joint anchor frame at child body
+        X_wcj = X_wpj * X_j
+        # transform from world to child body frame
+        X_wc = X_wcj * wp.transform_inverse(X_cj)
 
-    # compute transform of center of mass
-    X_cm = body_X_com[child]
-    X_sm = X_wc * X_cm
+        # compute transform of center of mass
+        X_cm = body_X_com[child]
+        X_sm = X_wc * X_cm
 
-    # store geometry transforms
-    body_q[child] = X_wc
-    body_q_com[child] = X_sm
+        # store geometry transforms
+        body_q[child] = X_wc
+        body_q_com[child] = X_sm
 
 
 @wp.kernel
@@ -723,23 +729,23 @@ def eval_rigid_fk(
     start = articulation_start[index]
     end = articulation_start[index + 1]
 
-    for i in range(start, end):
-        compute_link_transform(
-            i,
-            joint_type,
-            joint_parent,
-            joint_child,
-            joint_q_start,
-            joint_q,
-            joint_X_p,
-            joint_X_c,
-            body_X_com,
-            joint_axis,
-            joint_axis_start,
-            joint_axis_dim,
-            body_q,
-            body_q_com,
-        )
+    compute_link_transform(
+        start,
+        end,
+        joint_type,
+        joint_parent,
+        joint_child,
+        joint_q_start,
+        joint_q,
+        joint_X_p,
+        joint_X_c,
+        body_X_com,
+        joint_axis,
+        joint_axis_start,
+        joint_axis_dim,
+        body_q,
+        body_q_com,
+    )
 
 
 @wp.func
@@ -777,7 +783,8 @@ def dense_index(stride: int, i: int, j: int):
 
 @wp.func
 def compute_link_velocity(
-    i: int,
+    start: int,
+    end: int,
     joint_type: wp.array(dtype=int),
     joint_parent: wp.array(dtype=int),
     joint_child: wp.array(dtype=int),
@@ -801,71 +808,72 @@ def compute_link_velocity(
     body_f_s: wp.array(dtype=wp.spatial_vector),
     body_a_s: wp.array(dtype=wp.spatial_vector),
 ):
-    type = joint_type[i]
-    child = joint_child[i]
-    parent = joint_parent[i]
-    q_start = joint_q_start[i]
-    qd_start = joint_qd_start[i]
+    for i in range(start, end):
+        type = joint_type[i]
+        child = joint_child[i]
+        parent = joint_parent[i]
+        q_start = joint_q_start[i]
+        qd_start = joint_qd_start[i]
 
-    X_pj = joint_X_p[i]
-    # X_cj = joint_X_c[i]
+        X_pj = joint_X_p[i]
+        # X_cj = joint_X_c[i]
 
-    # parent anchor frame in world space
-    X_wpj = X_pj
-    if parent >= 0:
-        X_wp = body_q[parent]
-        X_wpj = X_wp * X_wpj
+        # parent anchor frame in world space
+        X_wpj = X_pj
+        if parent >= 0:
+            X_wp = body_q[parent]
+            X_wpj = X_wp * X_wpj
 
-    # compute motion subspace and velocity across the joint (also stores S_s to global memory)
-    axis_start = joint_axis_start[i]
-    lin_axis_count = joint_axis_dim[i, 0]
-    ang_axis_count = joint_axis_dim[i, 1]
-    v_j_s = jcalc_motion(
-        type,
-        joint_axis,
-        axis_start,
-        lin_axis_count,
-        ang_axis_count,
-        X_wpj,
-        joint_q,
-        joint_qd,
-        q_start,
-        qd_start,
-        joint_S_s,
-    )
+        # compute motion subspace and velocity across the joint (also stores S_s to global memory)
+        axis_start = joint_axis_start[i]
+        lin_axis_count = joint_axis_dim[i, 0]
+        ang_axis_count = joint_axis_dim[i, 1]
+        v_j_s = jcalc_motion(
+            type,
+            joint_axis,
+            axis_start,
+            lin_axis_count,
+            ang_axis_count,
+            X_wpj,
+            joint_q,
+            joint_qd,
+            q_start,
+            qd_start,
+            joint_S_s,
+        )
 
-    # parent velocity
-    v_parent_s = wp.spatial_vector()
-    a_parent_s = wp.spatial_vector()
+        # parent velocity
+        v_parent_s = wp.spatial_vector()
+        a_parent_s = wp.spatial_vector()
 
-    if parent >= 0:
-        v_parent_s = body_v_s[parent]
-        a_parent_s = body_a_s[parent]
+        if parent >= 0:
+            v_parent_s = body_v_s[parent]
+            a_parent_s = body_a_s[parent]
 
-    # body velocity, acceleration
-    v_s = v_parent_s + v_j_s
-    a_s = a_parent_s + spatial_cross(v_s, v_j_s)  # + joint_S_s[i]*self.joint_qdd[i]
+        # body velocity, acceleration
+        v_s = v_parent_s + v_j_s
+        a_s = a_parent_s + spatial_cross(v_s, v_j_s)  # + joint_S_s[i]*self.joint_qdd[i]
 
-    # compute body forces
-    X_sm = body_q_com[child]
-    I_m = body_I_m[child]
+        # compute body forces
+        X_sm = body_q_com[child]
+        I_m = body_I_m[child]
 
-    # gravity and external forces (expressed in frame aligned with s but centered at body mass)
-    m = I_m[3, 3]
+        # gravity and external forces (expressed in frame aligned with s but centered at body mass)
+        m = I_m[3, 3]
 
-    f_g = m * gravity
-    r_com = wp.transform_get_translation(X_sm)
-    f_g_s = wp.spatial_vector(wp.cross(r_com, f_g), f_g)
+        f_g = m * gravity
+        r_com = wp.transform_get_translation(X_sm)
+        f_g_s = wp.spatial_vector(wp.cross(r_com, f_g), f_g)
 
-    # body forces
-    I_s = spatial_transform_inertia(X_sm, I_m)
+        # body forces
+        I_s = spatial_transform_inertia(X_sm, I_m)
 
-    f_b_s = I_s * a_s + spatial_cross_dual(v_s, I_s * v_s)
+        f_b_s = I_s * a_s + spatial_cross_dual(v_s, I_s * v_s)
 
-    body_v_s[child] = v_s
-    body_a_s[child] = a_s
-    body_f_s[child] = f_b_s - f_g_s
-    body_I_s[child] = I_s
+        body_v_s[child] = v_s
+        body_a_s[child] = a_s
+        body_f_s[child] = f_b_s - f_g_s
+        body_I_s[child] = I_s
 
 
 # Inverse dynamics via Recursive Newton-Euler algorithm (Featherstone Table 5.1)
@@ -902,31 +910,31 @@ def eval_rigid_id(
     end = articulation_start[index + 1]
 
     # compute link velocities and coriolis forces
-    for i in range(start, end):
-        compute_link_velocity(
-            i,
-            joint_type,
-            joint_parent,
-            joint_child,
-            joint_q_start,
-            joint_qd_start,
-            joint_q,
-            joint_qd,
-            joint_axis,
-            joint_axis_start,
-            joint_axis_dim,
-            body_I_m,
-            body_q,
-            body_q_com,
-            joint_X_p,
-            joint_X_c,
-            gravity,
-            joint_S_s,
-            body_I_s,
-            body_v_s,
-            body_f_s,
-            body_a_s,
-        )
+    compute_link_velocity(
+        start,
+        end,
+        joint_type,
+        joint_parent,
+        joint_child,
+        joint_q_start,
+        joint_qd_start,
+        joint_q,
+        joint_qd,
+        joint_axis,
+        joint_axis_start,
+        joint_axis_dim,
+        body_I_m,
+        body_q,
+        body_q_com,
+        joint_X_p,
+        joint_X_c,
+        gravity,
+        joint_S_s,
+        body_I_s,
+        body_v_s,
+        body_f_s,
+        body_a_s,
+    )
 
 
 @wp.kernel
@@ -954,7 +962,7 @@ def eval_rigid_tau(
     body_f_ext: wp.array(dtype=wp.spatial_vector),
     # outputs
     body_ft_s: wp.array(dtype=wp.spatial_vector),
-    tau: wp.array(dtype=float),
+    joint_tau: wp.array(dtype=float),
 ):
     # one thread per-articulation
     index = wp.tid()
@@ -1003,7 +1011,7 @@ def eval_rigid_tau(
             lin_axis_count,
             ang_axis_count,
             f_s,
-            tau,
+            joint_tau,
         )
 
         # update parent forces, todo: check that this is valid for the backwards pass
@@ -1011,12 +1019,45 @@ def eval_rigid_tau(
             wp.atomic_add(body_ft_s, parent, f_s)
 
 
+@wp.func
+def eval_rigid_jacobian_fn(
+    joint_start: int,
+    joint_count: int,
+    J_offset: int,
+    articulation_dof_start: int,
+    articulation_dof_count: int,
+    joint_ancestor: wp.array(dtype=int),
+    joint_qd_start: wp.array(dtype=int),
+    joint_S_s: wp.array(dtype=wp.spatial_vector),
+    # outputs
+    J: wp.array(dtype=float),
+):
+    for i in range(joint_count):
+        row_start = i * 6
+
+        j = joint_start + i
+        while j != -1:
+            joint_dof_start = joint_qd_start[j]
+            joint_dof_end = joint_qd_start[j + 1]
+            joint_dof_count = joint_dof_end - joint_dof_start
+
+            # fill out each row of the Jacobian walking up the tree
+            for dof in range(joint_dof_count):
+                col = (joint_dof_start - articulation_dof_start) + dof
+                S = joint_S_s[joint_dof_start + dof]
+
+                for k in range(6):
+                    J[J_offset + dense_index(articulation_dof_count, row_start + k, col)] = S[k]
+
+            j = joint_ancestor[j]
+
+
 # builds spatial Jacobian J which is an (joint_count*6)x(dof_count) matrix
 @wp.kernel
 def eval_rigid_jacobian(
     articulation_start: wp.array(dtype=int),
     articulation_J_start: wp.array(dtype=int),
-    joint_parent: wp.array(dtype=int),
+    joint_ancestor: wp.array(dtype=int),
     joint_qd_start: wp.array(dtype=int),
     joint_S_s: wp.array(dtype=wp.spatial_vector),
     # outputs
@@ -1035,24 +1076,17 @@ def eval_rigid_jacobian(
     articulation_dof_end = joint_qd_start[joint_end]
     articulation_dof_count = articulation_dof_end - articulation_dof_start
 
-    for i in range(joint_count):
-        row_start = i * 6
-
-        j = joint_start + i
-        while j != -1:
-            joint_dof_start = joint_qd_start[j]
-            joint_dof_end = joint_qd_start[j + 1]
-            joint_dof_count = joint_dof_end - joint_dof_start
-
-            # fill out each row of the Jacobian walking up the tree
-            for dof in range(joint_dof_count):
-                col = (joint_dof_start - articulation_dof_start) + dof
-                S = joint_S_s[joint_dof_start + dof]
-
-                for k in range(6):
-                    J[J_offset + dense_index(articulation_dof_count, row_start + k, col)] = S[k]
-
-            j = joint_parent[j]
+    eval_rigid_jacobian_fn(
+        joint_start,
+        joint_count,
+        J_offset,
+        articulation_dof_start,
+        articulation_dof_count,
+        joint_ancestor,
+        joint_qd_start,
+        joint_S_s,
+        J,
+    )
 
 
 @wp.func
@@ -1543,7 +1577,7 @@ class FeatherstoneIntegrator(Integrator):
         if model.body_count:
             # joints
             target.joint_qdd = wp.zeros_like(model.joint_qd, requires_grad=requires_grad)
-            target.joint_tau = wp.empty_like(model.joint_qd, requires_grad=requires_grad)
+            target.joint_tau = wp.zeros_like(model.joint_qd, requires_grad=requires_grad)
             if requires_grad:
                 # used in the custom grad implementation of eval_dense_solve_batched
                 target.joint_solve_tmp = wp.zeros_like(model.joint_qd, requires_grad=True)
@@ -1557,36 +1591,23 @@ class FeatherstoneIntegrator(Integrator):
             )
 
             # derived rigid body data (maximal coordinates)
-            target.body_q_com = wp.empty_like(model.body_q, requires_grad=requires_grad)
-            target.body_I_s = wp.empty(
-                (model.body_count,), dtype=wp.spatial_matrix, device=model.device, requires_grad=requires_grad
-            )
-            target.body_v_s = wp.empty(
-                (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
-            )
-            target.body_a_s = wp.empty(
-                (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
-            )
-            target.body_f_s = wp.zeros(
-                (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
-            )
-            target.body_ft_s = wp.zeros(
-                (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
-            )
+            B = model.body_count
+            target.body_q_com = wp.empty((B,), dtype=wp.transform, device=model.device, requires_grad=requires_grad)
+            target.body_I_s = wp.empty((B,), dtype=wp.spatial_matrix, device=model.device, requires_grad=requires_grad)
+            target.body_v_s = wp.empty((B,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad)
+            target.body_a_s = wp.empty((B,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad)
+            target.body_f_s = wp.zeros((B,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad)
+            target.body_ft_s = wp.zeros((B,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad)
 
         target._featherstone_augmented = True
 
     def simulate(self, model: Model, state_in: State, state_out: State, dt: float, control: Control = None):
         requires_grad = state_in.requires_grad
 
-        # optionally create dynamical auxiliary variables
-        if requires_grad:
-            state_aug = state_out
-        else:
-            state_aug = self
-
-        if not getattr(state_aug, "_featherstone_augmented", False):
-            self.allocate_state_aux_vars(model, state_aug, requires_grad)
+        if not getattr(state_in, "_featherstone_augmented", False):
+            self.allocate_state_aux_vars(model, state_in, requires_grad)
+        if not getattr(state_out, "_featherstone_augmented", False):
+            self.allocate_state_aux_vars(model, state_out, requires_grad)
         if control is None:
             control = model.control(clone_variables=False)
 
@@ -1650,7 +1671,7 @@ class FeatherstoneIntegrator(Integrator):
                         model.joint_axis_start,
                         model.joint_axis_dim,
                     ],
-                    outputs=[state_in.body_q, state_aug.body_q_com],
+                    outputs=[state_in.body_q, state_in.body_q_com],
                     device=model.device,
                 )
 
@@ -1658,7 +1679,7 @@ class FeatherstoneIntegrator(Integrator):
                 # print(state_in.body_q.numpy())
 
                 # evaluate joint inertias, motion vectors, and forces
-                state_aug.body_f_s.zero_()
+                state_in.body_f_s.zero_()
                 wp.launch(
                     eval_rigid_id,
                     dim=model.articulation_count,
@@ -1676,17 +1697,17 @@ class FeatherstoneIntegrator(Integrator):
                         model.joint_axis_dim,
                         model.fs_body_I_m,
                         state_in.body_q,
-                        state_aug.body_q_com,
+                        state_in.body_q_com,
                         model.joint_X_p,
                         model.joint_X_c,
                         model.gravity,
                     ],
                     outputs=[
-                        state_aug.joint_S_s,
-                        state_aug.body_I_s,
-                        state_aug.body_v_s,
-                        state_aug.body_f_s,
-                        state_aug.body_a_s,
+                        state_in.joint_S_s,
+                        state_in.body_I_s,
+                        state_in.body_v_s,
+                        state_in.body_f_s,
+                        state_in.body_a_s,
                     ],
                     device=model.device,
                 )
@@ -1699,7 +1720,7 @@ class FeatherstoneIntegrator(Integrator):
                         dim=model.rigid_contact_max,
                         inputs=[
                             state_in.body_q,
-                            state_aug.body_v_s,
+                            state_in.body_v_s,
                             model.body_com,
                             model.shape_materials,
                             model.shape_geo,
@@ -1721,7 +1742,8 @@ class FeatherstoneIntegrator(Integrator):
 
                 if model.articulation_count:
                     # evaluate joint torques
-                    state_aug.body_ft_s.zero_()
+                    state_in.body_ft_s.zero_()
+                    state_in.joint_tau.zero_()
                     wp.launch(
                         eval_rigid_tau,
                         dim=model.articulation_count,
@@ -1744,19 +1766,19 @@ class FeatherstoneIntegrator(Integrator):
                             model.joint_limit_upper,
                             model.joint_limit_ke,
                             model.joint_limit_kd,
-                            state_aug.joint_S_s,
-                            state_aug.body_f_s,
+                            state_in.joint_S_s,
+                            state_in.body_f_s,
                             body_f,
                         ],
                         outputs=[
-                            state_aug.body_ft_s,
-                            state_aug.joint_tau,
+                            state_in.body_ft_s,
+                            state_in.joint_tau,
                         ],
                         device=model.device,
                     )
 
                     # print("joint_tau:")
-                    # print(state_aug.joint_tau.numpy())
+                    # print(state_in.joint_tau.numpy())
                     # print("body_q:")
                     # print(state_in.body_q.numpy())
                     # print("body_qd:")
@@ -1770,11 +1792,11 @@ class FeatherstoneIntegrator(Integrator):
                             inputs=[
                                 model.articulation_start,
                                 model.fs_articulation_J_start,
-                                model.joint_parent,
+                                model.joint_ancestor,
                                 model.joint_qd_start,
-                                state_aug.joint_S_s,
+                                state_in.joint_S_s,
                             ],
-                            outputs=[state_aug.J],
+                            outputs=[state_out.J],
                             device=model.device,
                         )
 
@@ -1785,9 +1807,9 @@ class FeatherstoneIntegrator(Integrator):
                             inputs=[
                                 model.articulation_start,
                                 model.fs_articulation_M_start,
-                                state_aug.body_I_s,
+                                state_in.body_I_s,
                             ],
-                            outputs=[state_aug.M],
+                            outputs=[state_out.M],
                             device=model.device,
                         )
 
@@ -1805,10 +1827,10 @@ class FeatherstoneIntegrator(Integrator):
                                 model.fs_articulation_J_start,
                                 # P start is the same as J start since it has the same dims as J
                                 model.fs_articulation_J_start,
-                                state_aug.M,
-                                state_aug.J,
+                                state_out.M,
+                                state_out.J,
                             ],
-                            outputs=[state_aug.P],
+                            outputs=[state_out.P],
                             device=model.device,
                         )
 
@@ -1827,10 +1849,10 @@ class FeatherstoneIntegrator(Integrator):
                                 # P start is the same as J start since it has the same dims as J
                                 model.fs_articulation_J_start,
                                 model.fs_articulation_H_start,
-                                state_aug.J,
-                                state_aug.P,
+                                state_out.J,
+                                state_out.P,
                             ],
-                            outputs=[state_aug.H],
+                            outputs=[state_out.H],
                             device=model.device,
                         )
 
@@ -1841,27 +1863,27 @@ class FeatherstoneIntegrator(Integrator):
                             inputs=[
                                 model.fs_articulation_H_start,
                                 model.fs_articulation_H_rows,
-                                state_aug.H,
+                                state_out.H,
                                 model.joint_armature,
                             ],
-                            outputs=[state_aug.L],
+                            outputs=[state_out.L],
                             device=model.device,
                         )
 
                         # print("joint_act:")
                         # print(control.joint_act.numpy())
                         # print("joint_tau:")
-                        # print(state_aug.joint_tau.numpy())
+                        # print(state_in.joint_tau.numpy())
                         # print("H:")
-                        # print(state_aug.H.numpy())
+                        # print(state_out.H.numpy())
                         # print("L:")
-                        # print(state_aug.L.numpy())
+                        # print(state_out.L.numpy())
                     else:
-                        wp.copy(state_aug.H, state_in.H)
-                        wp.copy(state_aug.L, state_in.L)
+                        wp.copy(state_out.H, state_in.H)
+                        wp.copy(state_out.L, state_in.L)
 
                     # solve for qdd
-                    # state_aug.joint_qdd.zero_()
+                    state_in.joint_qdd.zero_()
                     wp.launch(
                         eval_dense_solve_batched,
                         dim=model.articulation_count,
@@ -1869,13 +1891,13 @@ class FeatherstoneIntegrator(Integrator):
                             model.fs_articulation_H_start,
                             model.fs_articulation_H_rows,
                             model.fs_articulation_dof_start,
-                            state_aug.H,
-                            state_aug.L,
-                            state_aug.joint_tau,
+                            state_out.H,
+                            state_out.L,
+                            state_in.joint_tau,
                         ],
                         outputs=[
-                            state_aug.joint_qdd,
-                            state_aug.joint_solve_tmp,
+                            state_in.joint_qdd,
+                            state_in.joint_solve_tmp,
                         ],
                         device=model.device,
                     )
@@ -1887,11 +1909,14 @@ class FeatherstoneIntegrator(Integrator):
                     #         arrays=[a, b, c, d],
                     #     )
                     # print("joint_qdd:")
-                    # print(state_aug.joint_qdd.numpy())
+                    # print(state_in.joint_qdd.numpy())
                     # print("\n\n")
 
             # -------------------------------------
             # integrate bodies
+
+            # updates state_out
+            # joint_q, joint_qd, body_q, body_qd, particle_q, particle_qd
 
             if model.joint_count:
                 wp.launch(
@@ -1904,7 +1929,7 @@ class FeatherstoneIntegrator(Integrator):
                         model.joint_axis_dim,
                         state_in.joint_q,
                         state_in.joint_qd,
-                        state_aug.joint_qdd,
+                        state_in.joint_qdd,
                         dt,
                     ],
                     outputs=[state_out.joint_q, state_out.joint_qd],
@@ -1913,6 +1938,9 @@ class FeatherstoneIntegrator(Integrator):
 
                 # update maximal coordinates
                 eval_fk(model, state_out.joint_q, state_out.joint_qd, None, state_out)
+
+                # wp.copy(state_out.joint_qdd, state_in.joint_qdd)
+                # wp.copy(state_out.joint_tau, state_in.joint_tau)
 
             self.integrate_particles(model, state_in, state_out, dt)
 
