@@ -314,16 +314,6 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                 # self.render_mpm_halves(state=state)
                 self.renderer.end_frame()
 
-    def render_mpm(self, state=None):
-        state = state or self.state_1
-
-        # render mpm particles
-        particle_q = state.mpm_x
-        particle_q = particle_q.numpy()
-        particle_radius = 7.5e-3
-        particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
-        self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
-
     def render_mpm_halves(self, state=None):
         state = state or self.state_1
 
