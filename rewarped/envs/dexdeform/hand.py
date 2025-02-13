@@ -27,7 +27,7 @@ TASK_LENGTHS = {
 
 class Hand(MPMWarpEnvMixin, WarpEnv):
     sim_name = "Hand" + "DexDeform"
-    env_offset = (1.0, 0.0, 0.0)
+    env_offset = (1.75, 0.0, 1.75)
     env_offset_correction = False
 
     eval_fk = True
@@ -228,8 +228,20 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
             pass
         elif self.task_name == "flip":
             mpm_x = self.state.mpm_x.view(self.num_envs, -1, 3)
-            bounds = torch.tensor([0.04, 0.02, 0.04], device=self.device)
-            mpm_x[env_ids, :, :] += bounds * (torch.rand(size=(len(env_ids), 1, 3), device=self.device) - 0.5) * 2.0
+            mpm_x -= self.env_offsets.view(self.num_envs, 1, 3)
+
+            bounds = torch.tensor([0.1, 0.1, 0.1], device=self.device)
+            rand_pos = (torch.rand(size=(len(env_ids), 1, 3), device=self.device) - 0.5) * 2.0
+            rand_pos[:, :, 1] = rand_pos[:, :, 1] / 2.0 + 0.5  # +height only
+            rand_pos = torch.round(rand_pos, decimals=3)
+            mpm_x[env_ids, :, :] += bounds * rand_pos
+
+            scale = 0.05
+            rand_scale = (torch.rand(size=(len(env_ids), 1, 1), device=self.device) - 0.5) * 2.0
+            rand_scale = torch.round(rand_scale, decimals=3)
+            mpm_x[env_ids, :, :] *= 1.0 + (scale * rand_scale)
+
+            mpm_x += self.env_offsets.view(self.num_envs, 1, 3)
         else:
             raise NotImplementedError
 
@@ -313,16 +325,6 @@ class Hand(MPMWarpEnvMixin, WarpEnv):
                 self.render_mpm(state=state)
                 # self.render_mpm_halves(state=state)
                 self.renderer.end_frame()
-
-    def render_mpm(self, state=None):
-        state = state or self.state_1
-
-        # render mpm particles
-        particle_q = state.mpm_x
-        particle_q = particle_q.numpy()
-        particle_radius = 7.5e-3
-        particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
-        self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
 
     def render_mpm_halves(self, state=None):
         state = state or self.state_1

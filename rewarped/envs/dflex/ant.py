@@ -24,10 +24,6 @@ class Ant(WarpEnv):
     eval_fk = True
     eval_ik = False
 
-    # integrator_type = IntegratorType.EULER
-    # sim_substeps_euler = 16
-    # euler_settings = dict(angular_damping=0.0)
-
     integrator_type = IntegratorType.FEATHERSTONE
     sim_substeps_featherstone = 16
     featherstone_settings = dict(angular_damping=0.0, update_mass_matrix_every=sim_substeps_featherstone)
@@ -71,11 +67,13 @@ class Ant(WarpEnv):
             limit_kd=1.0e1,
             # armature=0.05,
             armature_scale=5,
-            # enable_self_collisions=True,
+            enable_self_collisions=True,
             up_axis="y",
         )
 
         builder.joint_axis_mode = [wp.sim.JOINT_MODE_FORCE] * len(builder.joint_axis_mode)
+        builder.joint_act[:] = [0.0] * len(builder.joint_act)
+
         builder.joint_q[7:] = [0.0, 1.0, 0.0, -1.0, 0.0, -1.0, 0.0, 1.0]
         builder.joint_q[:7] = [0.0, 0.7, 0.0, *wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -math.pi * 0.5)]
         builder.joint_q[1] = 0.75  # start_height
@@ -132,11 +130,17 @@ class Ant(WarpEnv):
         joint_q[env_ids, 7:] += 0.2 * (torch.rand(size=(N, num_joint_q - 7), device=self.device) - 0.5) * 2.0
         joint_qd[env_ids, :] = 0.5 * (torch.rand(size=(N, num_joint_qd), device=self.device) - 0.5)
 
+        # com -> twist velocity
+        ang_vel, lin_vel = joint_qd[env_ids, 0:3], joint_qd[env_ids, 3:6]
+        joint_qd[env_ids, 3:6] = lin_vel + torch.cross(joint_q[env_ids, 0:3], ang_vel, dim=-1)
+
     def pre_physics_step(self, actions):
         actions = actions.view(self.num_envs, -1)
         actions = torch.clip(actions, -1.0, 1.0)
         self.actions = actions
         acts = self.action_scale * actions
+
+        acts = -acts  # invert the action direction to match dFlex
 
         if self.joint_act_indices is ...:
             self.control.assign("joint_act", acts.flatten())

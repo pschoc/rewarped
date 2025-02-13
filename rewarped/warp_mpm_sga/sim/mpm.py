@@ -564,7 +564,7 @@ class MPMModel(Model):
                 if constant.ground_friction < 99.:
                     v = v * wp.max(1.0 + constant.ground_friction * up_v / (wp.length(v) + 1e-30), 0.0)
                 else:
-                    v = wp.vec3(0.0) 
+                    v = wp.vec3(0.0)
 
             # boundary condition
             if px < constant.bound and v[0] < 0.0:
@@ -654,7 +654,10 @@ class MPMModel(Model):
 
             # TODO: geo_type == wp.sim.GEO_MESH
 
-            # TODO: geo_type == wp.sim.GEO_SDF
+            if geo_type == wp.sim.GEO_SDF:
+                volume = body_geo.source[shape_index]
+                xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
+                d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, n)
 
             if geo_type == wp.sim.GEO_PLANE:
                 d = plane_sdf(geo_scale[0], geo_scale[1], x_local)

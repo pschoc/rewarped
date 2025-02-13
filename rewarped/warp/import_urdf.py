@@ -182,6 +182,7 @@ def parse_urdf(
                     has_shape_collision=not just_visual,
                     **contact_vars,
                 )
+                shapes.append(s)
 
             for mesh in geo.findall("mesh"):
                 filename = mesh.get("filename")

@@ -10,6 +10,7 @@ from .warp_mpm_sga.warp import replace_torch_cbrt, replace_torch_polar, replace_
 class MPMWarpEnvMixin:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        assert self.up_axis == "Y"
 
     def create_cfg_mpm(self, mpm_cfg):
         return mpm_cfg
@@ -70,3 +71,13 @@ class MPMWarpEnvMixin:
         replace_torch_polar()
         replace_torch_trace()
         replace_torch_cbrt()
+
+    def render_mpm(self, state=None):
+        state = state or self.state_1
+
+        # render mpm particles
+        particle_q = state.mpm_x
+        particle_q = particle_q.numpy()
+        particle_radius = 7.5e-3
+        particle_color = (0.875, 0.451, 1.0)  # 0xdf73ff
+        self.renderer.render_points("particle_q", particle_q, radius=particle_radius, colors=particle_color)
