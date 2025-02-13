@@ -59,11 +59,12 @@ class AllegroHand(WarpEnv):
     eval_ik = False
 
     integrator_type = IntegratorType.FEATHERSTONE
-    sim_substeps_featherstone = 64
+    sim_substeps_featherstone = 32
     featherstone_settings = dict(angular_damping=0.01, update_mass_matrix_every=sim_substeps_featherstone)
 
     # frame_dt = 1.0 / 60.0
-    frame_dt = 1.0 / 120.0
+    # frame_dt = 1.0 / 120.0
+    frame_dt = 1.0 / 240.0
     up_axis = "Z"
     ground_plane = False
 
@@ -101,7 +102,7 @@ class AllegroHand(WarpEnv):
         self.up_axis_idx = 2  # index of up axis: Y=1, Z=2
         self.action_scale = 1.0
         if self.use_torque_control:
-            self.action_scale = 0.5
+            self.action_scale = 2.0
 
     @property
     def observation_space(self):
@@ -261,11 +262,11 @@ class AllegroHand(WarpEnv):
             floating=False,
             density=1000.0,
             # contact_thickness=0.001,
-            contact_ke=1.0e3,
+            contact_ke=5.0e2,
             contact_kd=1.0e2,
             contact_kf=1.0e2,
-            contact_mu=0.75,
-            contact_restitution=0.5,
+            contact_mu=0.5,
+            contact_restitution=0.0,
             # contact_ke=4.0e3,
             # contact_kd=1.0e3,
             # contact_kf=3.0e2,
@@ -275,8 +276,8 @@ class AllegroHand(WarpEnv):
             ignore_inertial_definitions=False,
             collapse_fixed_joints=True,
             #
-            force_show_colliders=True,
-            hide_visuals=True,
+            # force_show_colliders=True,
+            # hide_visuals=True,
         )
 
         # self.num_hand_bodies = builder.body_count
@@ -420,8 +421,8 @@ class AllegroHand(WarpEnv):
         p[0] = self.hand_start_pose.p[0]
         pose_dy, pose_dz = -0.2, 0.06
         if self.which_hand == "dflex":
-            pose_dy = -0.115
-            pose_dz = 0.10
+            pose_dy = -0.1
+            pose_dz = 0.1
         p[1] = self.hand_start_pose.p[1] + pose_dy
         p[2] = self.hand_start_pose.p[2] + pose_dz
         if self.object_type == "pen":
@@ -458,11 +459,11 @@ class AllegroHand(WarpEnv):
             # contact_kd=1000.0,
             # contact_kf=1000.0,
             # contact_mu=0.5,
-            contact_ke=1.0e3,
+            contact_ke=5.0e2,
             contact_kd=1.0e2,
             contact_kf=1.0e2,
-            contact_mu=0.75,
-            contact_restitution=0.5,
+            contact_mu=0.5,
+            contact_restitution=0.0,
             # contact_ke=4.0e3,
             # contact_kd=1.0e3,
             # contact_kf=3.0e2,
