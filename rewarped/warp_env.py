@@ -183,7 +183,7 @@ class WarpEnv(Environment):
 
         self.num_obs = num_obs
         self.num_act = num_act
-        self.obs_space = spaces.Box(np.ones(self.num_obs) * -np.Inf, np.ones(self.num_obs) * np.Inf)
+        self.obs_space = spaces.Box(np.ones(self.num_obs) * -np.inf, np.ones(self.num_obs) * np.inf)
         self.act_space = spaces.Box(np.ones(self.num_act) * -1.0, np.ones(self.num_act) * 1.0)
 
         self.scatter_actions = staticmethod(scatter_clone)  # alias for convenience
