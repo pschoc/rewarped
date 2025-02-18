@@ -182,7 +182,11 @@ class AllegroHand(WarpEnv):
             )
         print("Obs type:", self.obs_type)
 
-        self.num_obs_dict = {"full_no_vel": 50, "full": 72, "full_state": 88,}
+        self.num_obs_dict = {
+            "full_no_vel": 50,
+            "full": 72,
+            "full_state": 88,
+        }
 
         # self.up_axis = "Z"
 

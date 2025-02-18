@@ -170,9 +170,9 @@ class ShadowHand(WarpEnv):
 
         # can be "openai", "full_no_vel", "full", "full_state"
         self.obs_type = cfg["env"]["observationType"]
-        if not (self.obs_type in ["openai", "full_no_vel", "full", "full_state"]):
-            raise Exception(
-                "Unknown type of observations!\nobservationType should be one of: [openai, full_no_vel, full, full_state]")
+        obs_types = ("openai", "full_no_vel", "full", "full_state")
+        if self.obs_type not in obs_types:
+            raise Exception(f"Unknown type of observations!\nobservationType should be one of: {obs_types}")
         print("Obs type:", self.obs_type)
 
         self.num_obs_dict = {
@@ -184,7 +184,13 @@ class ShadowHand(WarpEnv):
 
         # self.up_axis = "Z"
 
-        self.fingertips = ["robot0:ffdistal", "robot0:mfdistal", "robot0:rfdistal", "robot0:lfdistal", "robot0:thdistal"]
+        self.fingertips = [
+            "robot0:ffdistal",
+            "robot0:mfdistal",
+            "robot0:rfdistal",
+            "robot0:lfdistal",
+            "robot0:thdistal",
+        ]
         self.num_fingertips = len(self.fingertips)
 
         self.use_vel_obs = False
