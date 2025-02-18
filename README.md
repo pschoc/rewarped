@@ -39,7 +39,7 @@ Differentiable Simulation
 - [`NVIDIA/warp`](https://github.com/NVIDIA/warp)
 - [`NVlabs/DiffRL`](https://github.com/NVlabs/DiffRL)
 - MPM
-  - [`PingchuanMa/NCLaw`](https://github.com/PingchuanMa/NCLaw)
+  - [`PingchuanMa/SGA`](https://github.com/PingchuanMa/SGA), [`PingchuanMa/NCLaw`](https://github.com/PingchuanMa/NCLaw)
   - [`sizhe-li/DexDeform`](https://github.com/sizhe-li/DexDeform)
   - [`hzaskywalker/PlasticineLab`](https://github.com/hzaskywalker/PlasticineLab)
 
