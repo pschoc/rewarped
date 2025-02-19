@@ -14,12 +14,12 @@ class Transport(MPMWarpEnvMixin, WarpEnv):
     env_offset = (1.5, 0.0, 1.5)
     env_offset_correction = False
 
+    integrator_type = IntegratorType.MPM
+    sim_substeps_mpm = 40
+
     eval_fk = True
     kinematic_fk = True
     eval_ik = False
-
-    integrator_type = IntegratorType.MPM
-    sim_substeps_mpm = 40
 
     up_axis = "Y"
     ground_plane = True

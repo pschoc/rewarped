@@ -39,9 +39,6 @@ class SoftWalker(WarpEnv):
     sim_name = "SoftWalker" + "GradSim"
     env_offset = (0.0, 0.0, 7.5)
 
-    eval_fk = False
-    eval_ik = False
-
     # integrator_type = IntegratorType.EULER
     # sim_substeps_euler = 80
     # euler_settings = dict(angular_damping=0.05)
@@ -49,6 +46,9 @@ class SoftWalker(WarpEnv):
     integrator_type = IntegratorType.FEATHERSTONE
     sim_substeps_featherstone = 80
     featherstone_settings = dict(angular_damping=0.05, update_mass_matrix_every=sim_substeps_featherstone)
+
+    eval_fk = False
+    eval_ik = False
 
     frame_dt = 1.0 / 60.0
     up_axis = "Y"

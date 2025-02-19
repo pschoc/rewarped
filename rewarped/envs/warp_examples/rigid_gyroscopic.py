@@ -27,9 +27,6 @@ class RigidGyroscopic(WarpEnv):
     sim_name = "RigidGyroscopic" + "WarpExamples"
     env_offset = (1.0, 1.0, 0.0)
 
-    eval_fk = True
-    eval_ik = False
-
     integrator_type = IntegratorType.EULER
     sim_substeps_euler = 1
     euler_settings = dict(angular_damping=0.05)
@@ -38,8 +35,10 @@ class RigidGyroscopic(WarpEnv):
     # sim_substeps_featherstone = 1
     # featherstone_settings = dict(angular_damping=0.05, update_mass_matrix_every=sim_substeps_featherstone)
 
-    frame_dt = 1.0 / 120.0
+    eval_fk = True
+    eval_ik = False
 
+    frame_dt = 1.0 / 120.0
     up_axis = "Z"
     ground_plane = False
     gravity = 0.0
@@ -95,7 +94,7 @@ class RigidGyroscopic(WarpEnv):
         self.obs_buf = {}
 
     def compute_reward(self):
-        rew = 0.0
+        rew = torch.zeros(self.num_envs, device=self.device)
 
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
         max_episode_steps, early_termination = self.episode_length, self.early_termination

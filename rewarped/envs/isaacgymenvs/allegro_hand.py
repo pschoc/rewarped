@@ -55,12 +55,12 @@ class AllegroHand(WarpEnv):
     sim_name = "AllegroHand" + "IsaacGymEnvs"
     env_offset = (0.5, 0.5, 0.0)
 
-    eval_fk = True
-    eval_ik = False
-
     integrator_type = IntegratorType.FEATHERSTONE
     sim_substeps_featherstone = 32
     featherstone_settings = dict(angular_damping=0.01, update_mass_matrix_every=sim_substeps_featherstone)
+
+    eval_fk = True
+    eval_ik = False if integrator_type == IntegratorType.FEATHERSTONE else True
 
     # frame_dt = 1.0 / 60.0
     # frame_dt = 1.0 / 120.0

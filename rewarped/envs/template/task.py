@@ -10,9 +10,6 @@ class Task(WarpEnv):
     sim_name = "Task" + "Template"
     env_offset = (5.0, 5.0, 0.0)
 
-    eval_fk = True
-    eval_ik = False
-
     # integrator_type = IntegratorType.EULER
     # sim_substeps_euler = 16
     # euler_settings = dict(angular_damping=0.0)
@@ -20,6 +17,9 @@ class Task(WarpEnv):
     integrator_type = IntegratorType.FEATHERSTONE
     sim_substeps_featherstone = 16
     featherstone_settings = dict(angular_damping=0.0, update_mass_matrix_every=sim_substeps_featherstone)
+
+    eval_fk = True
+    eval_ik = False
 
     frame_dt = 1.0 / 60.0
     up_axis = "Z"

@@ -32,9 +32,6 @@ class Bounce(WarpEnv):
     sim_name = "Bounce" + "WarpExamples"
     env_offset = (0.0, 0.0, 2.5)
 
-    eval_fk = True
-    eval_ik = False
-
     # integrator_type = IntegratorType.EULER
     # sim_substeps_euler = 8
     # euler_settings = dict(angular_damping=0.0)
@@ -43,9 +40,11 @@ class Bounce(WarpEnv):
     sim_substeps_featherstone = 8
     featherstone_settings = dict(angular_damping=0.0, update_mass_matrix_every=sim_substeps_featherstone)
 
+    eval_fk = True
+    eval_ik = False
+
     frame_dt = 1.0 / 60.0
     episode_duration = 0.6
-
     up_axis = "Y"
     ground_plane = True
 

@@ -15,12 +15,12 @@ class RollingPin(MPMWarpEnvMixin, WarpEnv):
     sim_name = "RollingPin" + "PlasticineLab"
     env_offset = (2.0, 0.0, 2.0)
 
+    integrator_type = IntegratorType.MPM
+    sim_substeps_mpm = 40
+
     eval_fk = True
     kinematic_fk = True
     eval_ik = False
-
-    integrator_type = IntegratorType.MPM
-    sim_substeps_mpm = 40
 
     up_axis = "Y"
     ground_plane = True
