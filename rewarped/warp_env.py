@@ -448,12 +448,14 @@ class WarpEnv(Environment):
         else:
             super().update()
             # self.control_0 = self.model.control()
+            # self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
+
+        self.sim_time += self.frame_dt
 
     def step(self, actions):
         with wp.ScopedTimer("simulate", active=False, detailed=False):
             self.pre_physics_step(actions)
             self.do_physics_step()
-            self.sim_time += self.frame_dt
 
         self.progress_buf += 1
         self.num_frames += 1
