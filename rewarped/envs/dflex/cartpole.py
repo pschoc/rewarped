@@ -18,7 +18,7 @@ from .utils.torch_utils import normalize_angle
 
 
 class Cartpole(WarpEnv):
-    sim_name = "Cartpole" + "Dflex"
+    sim_name = "Cartpole" + "DFlex"
     env_offset = (0.0, 0.0, 2.5)
 
     integrator_type = IntegratorType.FEATHERSTONE
@@ -55,7 +55,7 @@ class Cartpole(WarpEnv):
         return builder
 
     def create_articulation(self, builder):
-        contact_params = dict(  # dFlex.urdf_load defaults
+        contact_params = dict(  # dflex.urdf_load defaults
             contact_ke=1.0e4,
             contact_kd=1.0e4,
             contact_kf=1.0e2,
@@ -64,7 +64,6 @@ class Cartpole(WarpEnv):
             contact_thickness=0.0,
         )
 
-        # dFlex settings
         wp.sim.parse_urdf(
             os.path.join(self.asset_dir, "dflex/cartpole.urdf"),
             builder,

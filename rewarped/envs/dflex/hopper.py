@@ -17,7 +17,7 @@ from ...warp_env import WarpEnv
 
 
 class Hopper(WarpEnv):
-    sim_name = "Hopper" + "Dflex"
+    sim_name = "Hopper" + "DFlex"
     env_offset = (0.0, 0.0, 0.0)
 
     # integrator_type = IntegratorType.EULER
@@ -57,7 +57,6 @@ class Hopper(WarpEnv):
         return builder
 
     def create_articulation(self, builder):
-        # dFlex settings
         wp.sim.parse_mjcf(
             os.path.join(self.asset_dir, "dflex/hopper.xml"),
             builder,

@@ -18,7 +18,7 @@ from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, 
 
 
 class Ant(WarpEnv):
-    sim_name = "Ant" + "Dflex"
+    sim_name = "Ant" + "DFlex"
     env_offset = (0.0, 0.0, 2.5)
 
     integrator_type = IntegratorType.FEATHERSTONE
@@ -51,7 +51,6 @@ class Ant(WarpEnv):
         return builder
 
     def create_articulation(self, builder):
-        # dFlex settings
         wp.sim.parse_mjcf(
             os.path.join(self.asset_dir, "dflex/ant.xml"),
             builder,
@@ -140,7 +139,7 @@ class Ant(WarpEnv):
         self.actions = actions
         acts = self.action_scale * actions
 
-        acts = -acts  # invert the action direction to match dFlex
+        acts = -acts  # invert the action direction to match dflex
 
         if self.joint_act_indices is ...:
             self.control.assign("joint_act", acts.flatten())

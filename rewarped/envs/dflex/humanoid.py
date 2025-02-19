@@ -18,7 +18,7 @@ from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, 
 
 
 class Humanoid(WarpEnv):
-    sim_name = "Humanoid" + "Dflex"
+    sim_name = "Humanoid" + "DFlex"
     env_offset = (0.0, 0.0, 2.5)
 
     integrator_type = IntegratorType.FEATHERSTONE
@@ -60,7 +60,6 @@ class Humanoid(WarpEnv):
         self.create_articulation(builder)
 
     def create_articulation(self, builder):
-        # dFlex settings
         wp.sim.parse_mjcf(
             os.path.join(self.asset_dir, "dflex/humanoid.xml"),
             builder,
@@ -143,7 +142,7 @@ class Humanoid(WarpEnv):
         self.actions = actions
         acts = self.action_scale * actions
 
-        acts = -acts  # invert the action direction to match dFlex
+        acts = -acts  # invert the action direction to match dflex
 
         if self.joint_act_indices is ...:
             self.control.assign("joint_act", acts.flatten())
@@ -205,7 +204,7 @@ class Humanoid(WarpEnv):
             + torch.sum(self.actions**2, dim=-1) * self.action_penalty
         )
 
-        # TODO: add nan value checking like in dFlex
+        # TODO: add nan value checking like in dflex
 
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
         max_episode_steps, early_termination = self.episode_length, self.early_termination

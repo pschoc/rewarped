@@ -7,7 +7,7 @@ from ...warp_env import WarpEnv
 
 
 class Anymal(WarpEnv):
-    sim_name = "Anymal" + "Dflex"
+    sim_name = "Anymal" + "DFlex"
     env_offset = (5.0, 5.0, 0.0)
 
     # integrator_type = IntegratorType.EULER
