@@ -35,8 +35,8 @@ from ...environment import IntegratorType, run_env
 from ...warp_env import WarpEnv
 
 
-class SoftWalker(WarpEnv):
-    sim_name = "SoftWalker" + "GradSim"
+class Jumper(WarpEnv):
+    sim_name = "Jumper" + "GradSim"
     env_offset = (0.0, 0.0, 7.5)
 
     # integrator_type = IntegratorType.EULER
@@ -519,4 +519,4 @@ def normalize(x, eps: float = 1e-9):
 
 
 if __name__ == "__main__":
-    run_env(SoftWalker, no_grad=False)
+    run_env(Jumper, no_grad=False)
