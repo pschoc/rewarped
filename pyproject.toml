@@ -1,17 +1,18 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools", "build", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "rewarped"
 authors = [{ name = "rewarped contributors", email = "etaoxing@users.noreply.github.com" }]
-requires-python = ">=3.9"
-description = ""
+requires-python = ">=3.10"
+description = "A platform for reinforcement learning in differentiable multiphysics simulation"
 license = {file = "LICENSE"}
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
@@ -19,6 +20,7 @@ dependencies = [
     "warp-lang>=1.3.3",
     "usd-core",
     "trimesh",
+    "pycollada",
 ]
 dynamic = ["version", "readme"]
 
@@ -26,7 +28,7 @@ dynamic = ["version", "readme"]
 dev = ["ruff"]
 
 [project.urls]
-GitHub = "https://github.com/etaoxing/rewarped"
+GitHub = "https://github.com/rewarped/rewarped"
 
 [tool.setuptools]
 packages = ["rewarped"]
@@ -36,12 +38,12 @@ version = { file = ["VERSION"] }
 readme = { file = ["README.md"], content-type = "text/markdown" }
 
 [tool.ruff]
+cache-dir = ".cache/ruff"
 line-length = 120
 indent-width = 4
 extend-exclude = [
     ".git",
     ".vscode",
-    ".ruff_cache",
     "__pycache__",
     "docs",
     "build",
