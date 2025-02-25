@@ -13,13 +13,100 @@ Rewarped 🌀 is a platform for reinforcement learning in parallel differentiabl
 - **differentiable simulation**: to compute batched analytic gradients for optimization.
 - **multiphysics**: (CRBA, FEM, MPM, XPBD) physics solvers and coupling to support interaction between rigid bodies, articulations, and various deformables.
 
-We use Rewarped to *re-implement* a variety of RL tasks from prior works, and demonstrate that first-order model-based RL algorithms (which use differentiable simulation to compute analytic policy gradients) can be scaled to a range of challenging manipulation and locomotion tasks that involve interaction between rigid bodies, articulations, and deformables.
+We use Rewarped to *re-implement* a variety of RL tasks from prior works, and demonstrate that first-order RL algorithms (which use differentiable simulation to compute first-order analytic gradients) can be scaled to a range of challenging manipulation and locomotion tasks that involve interaction between rigid bodies, articulations, and deformables.
 
 > For control and reinforcement learning algorithms, see [`etaoxing/mineral`](https://github.com/etaoxing/mineral).
+
+# Setup
+
+We have tested on the following environment: RTX 4090, Ubuntu 22.04, CUDA 12.5, Python 3.10, PyTorch 2.
+
+```bash
+conda create -n rewarped python=3.10
+conda activate rewarped
+
+pip install torch torchvision
+pip install gym==0.23.1
+pip install rewarped
+
+# --- Example: trajectory optimization
+python -m rewarped.envs.warp_examples.bounce --num_envs 4
+# will create a `.usd` file in `outputs/`
+# use MacOS Preview or alternatives to view
+
+# --- Example: (first-order) reinforcement learning
+pip install git+https://github.com/etaoxing/mineral
+python -m examples.run #TODO
+```
+
+# Usage
+
+## Tasks
+
+<table>
+  <tbody>
+  <tr>
+    <td>
+      <a href="./rewarped/envs/dflex/ant.py"><img src="./docs/assets/antrun.png"/></a>
+    </td>
+    <td>
+      <a href="./rewarped/envs/isaacgymenvs/allegro_hand.py"><img src="./docs/assets/handreorient.png"/></a>
+    </td>
+    <td>
+      <a href="./rewarped/envs/plasticinelab/rolling_pin.py"><img src="./docs/assets/rollingflat.png"/></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">dflex &#8226; AntRun</td>
+    <td align="center">isaacgymenvs &#8226; HandReorient</td>
+    <td align="center">plasticinelab &#8226; RollingFlat</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./rewarped/envs/gradsim/jumper.py"><img src="./docs/assets/softjumper.png"/></a>
+    </td>
+    <td>
+      <a href="./rewarped/envs/dexdeform/flip.py"><img src="./docs/assets/handflip.png"/></a>
+    </td>
+    <td>
+      <a href="./rewarped/envs/softgym/transport.py"><img src="./docs/assets/fluidtransport.png"/></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">gradsim &#8226; SoftJumper</td>
+    <td align="center">dexdeform &#8226; HandFlip</td>
+    <td align="center">softgym &#8226; FluidTransport</td>
+  </tr>
+</tbody>
+</table>
+
+## Creating a new task
+
+Copy and modify [`rewarped/envs/template/task.py`](rewarped/envs/template/task.py) into `rewarped/envs/<suite>/<task>.py`. Put assets in `assets/<suite>/`, and make sure non-text assets are tracked by Git LFS.
 
 # Contributing
 
 Contributions are welcome! Please refer to [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+# Acknowledgements
+
+Differentiable Simulation
+- [`NVIDIA/warp`](https://github.com/NVIDIA/warp)
+- [`NVlabs/DiffRL`](https://github.com/NVlabs/DiffRL)
+- MPM
+  - [`PingchuanMa/SGA`](https://github.com/PingchuanMa/SGA), [`PingchuanMa/NCLaw`](https://github.com/PingchuanMa/NCLaw)
+  - [`sizhe-li/DexDeform`](https://github.com/sizhe-li/DexDeform)
+  - [`hzaskywalker/PlasticineLab`](https://github.com/hzaskywalker/PlasticineLab)
+
+Tasks (alphabetical)
+- [`sizhe-li/DexDeform`](https://github.com/sizhe-li/DexDeform)
+- [`NVlabs/DiffRL`](https://github.com/NVlabs/DiffRL)
+- [`hzaskywalker/PlasticineLab`](https://github.com/hzaskywalker/PlasticineLab)
+- [`gradsim/gradsim`](https://github.com/gradsim/gradsim)
+- [`isaac-sim/IsaacGymEnvs`](https://github.com/isaac-sim/IsaacGymEnvs)
+- [`leggedrobotics/legged_gym`](https://github.com/leggedrobotics/legged_gym)
+- [`Xingyu-Lin/softgym`](https://github.com/Xingyu-Lin/softgym)
+- ...
 
 # Citing
 
@@ -32,23 +119,3 @@ Contributions are welcome! Please refer to [`CONTRIBUTING.md`](CONTRIBUTING.md).
   url={https://openreview.net/forum?id=DRiLWb8bJg}
 }
 ```
-
-# Acknowledgements
-
-Differentiable Simulation
-- [`NVIDIA/warp`](https://github.com/NVIDIA/warp)
-- [`NVlabs/DiffRL`](https://github.com/NVlabs/DiffRL)
-- MPM
-  - [`PingchuanMa/SGA`](https://github.com/PingchuanMa/SGA), [`PingchuanMa/NCLaw`](https://github.com/PingchuanMa/NCLaw)
-  - [`sizhe-li/DexDeform`](https://github.com/sizhe-li/DexDeform)
-  - [`hzaskywalker/PlasticineLab`](https://github.com/hzaskywalker/PlasticineLab)
-
-RL Tasks (alphabetical)
-- [`sizhe-li/DexDeform`](https://github.com/sizhe-li/DexDeform)
-- [`NVlabs/DiffRL`](https://github.com/NVlabs/DiffRL)
-- [`hzaskywalker/PlasticineLab`](https://github.com/hzaskywalker/PlasticineLab)
-- [`gradsim/gradsim`](https://github.com/gradsim/gradsim)
-- [`isaac-sim/IsaacGymEnvs`](https://github.com/isaac-sim/IsaacGymEnvs)
-- [`leggedrobotics/legged_gym`](https://github.com/leggedrobotics/legged_gym)
-- [`Xingyu-Lin/softgym`](https://github.com/Xingyu-Lin/softgym)
-- ...
