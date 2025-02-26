@@ -22,7 +22,7 @@ def parse_urdf(
     builder,
     xform=None,
     floating=False,
-    base_joint: Union[dict, str] = None,
+    base_joint: Union[dict, str, None] = None,
     density=1000.0,
     stiffness=100.0,
     damping=10.0,
@@ -230,15 +230,15 @@ def parse_urdf(
                 scaling = np.array([float(x) * scale for x in scaling.split()])
                 if hasattr(m, "geometry"):
                     # multiple meshes are contained in a scene
-                    for geom in m.geometry.values():
-                        vertices = np.array(geom.vertices, dtype=np.float32) * scaling
-                        faces = np.array(geom.faces.flatten(), dtype=np.int32)
-                        mesh = Mesh(vertices, faces)
+                    for m_geom in m.geometry.values():
+                        m_vertices = np.array(m_geom.vertices, dtype=np.float32) * scaling
+                        m_faces = np.array(m_geom.faces.flatten(), dtype=np.int32)
+                        m_mesh = Mesh(m_vertices, m_faces)
                         s = builder.add_shape_mesh(
                             body=link,
                             pos=wp.vec3(tf.p),
                             rot=wp.quat(tf.q),
-                            mesh=mesh,
+                            mesh=m_mesh,
                             density=density,
                             is_visible=visible,
                             has_ground_collision=not just_visual,
@@ -248,14 +248,14 @@ def parse_urdf(
                         shapes.append(s)
                 else:
                     # a single mesh
-                    vertices = np.array(m.vertices, dtype=np.float32) * scaling
-                    faces = np.array(m.faces.flatten(), dtype=np.int32)
-                    mesh = Mesh(vertices, faces)
+                    m_vertices = np.array(m.vertices, dtype=np.float32) * scaling
+                    m_faces = np.array(m.faces.flatten(), dtype=np.int32)
+                    m_mesh = Mesh(m_vertices, m_faces)
                     s = builder.add_shape_mesh(
                         body=link,
                         pos=wp.vec3(tf.p),
                         rot=wp.quat(tf.q),
-                        mesh=mesh,
+                        mesh=m_mesh,
                         density=density,
                         is_visible=visible,
                         has_ground_collision=not just_visual,
@@ -320,10 +320,13 @@ def parse_urdf(
             I_m = rot @ wp.mat33(I_m)
             m = float(inertial.find("mass").get("value") or "0")
             builder.body_mass[link] = m
-            builder.body_inv_mass[link] = 1.0 / m
+            builder.body_inv_mass[link] = 1.0 / m if m > 0.0 else 0.0
             builder.body_com[link] = com
             builder.body_inertia[link] = I_m
-            builder.body_inv_inertia[link] = wp.inverse(I_m)
+            if any(x for x in I_m):
+                builder.body_inv_inertia[link] = wp.inverse(I_m)
+            else:
+                builder.body_inv_inertia[link] = I_m
         if m == 0.0 and ensure_nonstatic_links:
             # set the mass to something nonzero to ensure the body is dynamic
             m = static_link_mass
