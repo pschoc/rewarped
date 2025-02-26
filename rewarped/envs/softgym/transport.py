@@ -133,6 +133,7 @@ class Transport(MPMWarpEnvMixin, WarpEnv):
         margin = 0.02
         size = [self.box_size[0] - margin, (self.box_size[1] - self.box_thickness) * 0.85, self.box_size[2] - margin]
         size = [np.round(x, 3) for x in size]
+        size = np.array(size).tolist()
         resolution = 20
 
         # num_grids = 96
