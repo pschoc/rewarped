@@ -3,7 +3,7 @@ from pathlib import Path
 from collections import defaultdict
 import importlib.util
 import subprocess
-from tqdm import tqdm
+# from tqdm import tqdm
 
 import torch
 from torch import Tensor
