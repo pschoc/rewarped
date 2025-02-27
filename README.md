@@ -88,6 +88,14 @@ Copy and modify [`rewarped/envs/template/task.py`](rewarped/envs/template/task.p
 
 Contributions are welcome! Please refer to [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+# Versioning
+
+Versions take the format X.Y.Z, where:
+- X.Y matches to version X.Y.* of `NVIDIA/warp`.
+- Z is incremented for bug fixes or new features.
+
+Compatibility with newer or older versions of `NVIDIA/warp` may work, but is not guaranteed or supported. There can be some breaking changes between minor versions.
+
 # Acknowledgements
 
 Differentiable Simulation
