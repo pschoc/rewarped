@@ -169,7 +169,7 @@ class Environment:
     separate_collision_group_per_env: bool = True
 
     asset_dir = os.path.join(os.path.dirname(__file__), "assets")
-    render_dir = os.path.join(os.path.dirname(__file__), "..", "outputs")
+    render_dir = None
 
     def __init__(self):
         self.profile = False
@@ -324,6 +324,13 @@ class Environment:
         return sim_substeps, integrator
 
     def create_renderer(self):
+        if self.render_dir is not None:
+            self.render_dir = os.path.realpath(self.render_dir)
+        elif "WARP_RENDER_DIR" in os.environ:
+            self.render_dir = os.path.realpath(os.environ.get("WARP_RENDER_DIR"))
+        else:
+            self.render_dir = os.path.join(wp.config.kernel_cache_dir, "../outputs")
+
         if self.render_mode == RenderMode.NONE:
             renderer = None
         elif self.render_mode == RenderMode.OPENGL:
@@ -484,6 +491,9 @@ class Environment:
             default=RenderMode.USD,
         )
         self.parser.add_argument(
+            "--render_dir", help="Render output directory", type=str, default="outputs/", required=False
+        )
+        self.parser.add_argument(
             "--num_envs", help="Number of environments to simulate", type=int, default=self.num_envs
         )
         self.parser.add_argument("--profile", help="Enable profiling", type=bool, default=self.profile)
@@ -493,6 +503,7 @@ class Environment:
         self.render_mode = args.renderer
         self.num_envs = args.num_envs
         self.profile = args.profile
+        self.render_dir = args.render_dir
 
     def run(self):
         # ---------------
