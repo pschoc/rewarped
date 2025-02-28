@@ -36,8 +36,17 @@ python -m rewarped.envs.warp_examples.bounce --num_envs 4
 
 # --- Example: (first-order) reinforcement learning
 pip install git+https://github.com/etaoxing/mineral
-python -m examples.run #TODO
+
+python -m mineral.scripts.run \
+  task=Rewarped agent=DFlexAntSAPO task.env.env_name=Ant task.env.env_suite=dflex \
+  logdir="workdir/RewarpedAnt4M-SAPO/$(date +%Y%m%d-%H%M%S.%2N)" \
+  agent.shac.max_epochs=2000 agent.shac.max_agent_steps=4.1e6 \
+  agent.network.actor_kwargs.mlp_kwargs.units=\[128,64,32\] \
+  agent.network.critic_kwargs.mlp_kwargs.units=\[64,64\] \
+  run=train_eval seed=1000
 ```
+
+> See [`mineral/docs/rewarped.md`](https://github.com/etaoxing/mineral/blob/main/docs/rewarped.md) for scripts to reproduce the original paper experiments on `rewarped==1.3.0`.
 
 # Usage
 
