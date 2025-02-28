@@ -498,7 +498,7 @@ class WarpEnv(Environment):
         self.state_0 = self.model.state()
         self.control_0 = self.model.control()
         # self.state_0.clear_forces()
-        # self.control_0.clear_acts()
+        # self.control_0.clear()
         if self.requires_grad:
             self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
             self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]

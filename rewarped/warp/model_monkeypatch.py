@@ -119,22 +119,11 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
     return s
 
 
-def Control_clear_acts(self: Control):
-    if self.joint_act:
-        self.joint_act.zero_()
-    if self.tri_activations:
-        self.tri_activations.zero_()
-    if self.tet_activations:
-        self.tet_activations.zero_()
-    if self.muscle_activations:
-        self.muscle_activations.zero_()
-
-
-def Model_control(self: Model, requires_grad=None, copy="clone") -> Control:
-    c = Control(self)
+def Model_control(self: Model, requires_grad=None, clone_variables=True, copy="clone") -> Control:
+    c = Control()
     if requires_grad is None:
         requires_grad = self.requires_grad
-    if copy is not None:
+    if clone_variables and copy is not None:
         copy_fn = get_copy_fn(copy)
 
         if self.joint_count:
@@ -151,6 +140,4 @@ def Model_control(self: Model, requires_grad=None, copy="clone") -> Control:
         c.tet_activations = self.tet_activations
         c.muscle_activations = self.muscle_activations
 
-    # monkeypatch add clear_acts() method
-    c.clear_acts = types.MethodType(Control_clear_acts, c)
     return c

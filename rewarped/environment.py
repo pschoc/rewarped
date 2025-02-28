@@ -110,8 +110,12 @@ class Environment:
     sim_substeps_xpbd: int = 5
     sim_substeps_mpm: int = 16
 
-    euler_settings = dict(angular_damping=0.05)
-    featherstone_settings = dict(angular_damping=0.05, update_mass_matrix_every=sim_substeps_featherstone)
+    euler_settings = dict(angular_damping=0.05, friction_smoothing=1.0)
+    featherstone_settings = dict(
+        angular_damping=0.05,
+        update_mass_matrix_every=sim_substeps_featherstone,
+        friction_smoothing=1.0,
+    )
     xpbd_settings = dict(
         iterations=2,
         soft_body_relaxation=0.9,
@@ -293,6 +297,7 @@ class Environment:
             particle_adhesion=0.0,
             particle_max_velocity=1e5,
             # Default soft contact settings
+            soft_contact_radius=0.2,
             soft_contact_margin=0.2,
             soft_contact_ke=1.0e3,
             soft_contact_kd=10.0,

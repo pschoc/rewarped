@@ -286,7 +286,7 @@ class AllegroHand(WarpEnv):
 
         # self.num_hand_bodies = builder.body_count
         # self.num_hand_shapes = builder.shape_count
-        self.num_hand_dofs = builder.joint_count
+        self.num_hand_dofs = builder.joint_axis_count
         # print("Num dofs: ", self.num_hand_dofs)
         # self.num_hand_actuators = self.num_hand_dofs
 
