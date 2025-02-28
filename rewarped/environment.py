@@ -168,7 +168,7 @@ class Environment:
     # to avoid collisions between environments
     separate_collision_group_per_env: bool = True
 
-    asset_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
+    asset_dir = os.path.join(os.path.dirname(__file__), "assets")
     render_dir = os.path.join(os.path.dirname(__file__), "..", "outputs")
 
     def __init__(self):
