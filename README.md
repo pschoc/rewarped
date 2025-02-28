@@ -82,7 +82,7 @@ python -m examples.run #TODO
 
 ## Creating a new task
 
-Copy and modify [`rewarped/envs/template/task.py`](rewarped/envs/template/task.py) into `rewarped/envs/<suite>/<task>.py`. Put assets in `assets/<suite>/`, and make sure non-text assets are tracked by Git LFS.
+Copy and modify [`rewarped/envs/template/task.py`](rewarped/envs/template/task.py) into `rewarped/envs/<suite>/<task>.py`. Put assets in `assets/<suite>/`.
 
 # Contributing
 
