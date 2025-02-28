@@ -30,8 +30,8 @@ dev = ["ruff"]
 [project.urls]
 GitHub = "https://github.com/rewarped/rewarped"
 
-[tool.setuptools]
-packages = ["rewarped"]
+[tool.setuptools.packages.find]
+include = ["rewarped*"]
 
 [tool.setuptools.dynamic]
 version = { file = ["VERSION"] }
