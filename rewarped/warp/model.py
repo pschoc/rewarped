@@ -3937,20 +3937,22 @@ class ModelBuilder:
         spring_indices = set()
 
         for _k, e in adj.edges.items():
+            # skip open edges
+            if e.f0 == -1 or e.f1 == -1:
+                continue
+
             self.add_edge(
                 e.o0, e.o1, e.v0, e.v1, edge_ke=edge_ke, edge_kd=edge_kd
             )  # opposite 0, opposite 1, vertex 0, vertex 1
 
-            # skip constraints open edges
-            if e.f0 != -1 and e.f1 != -1:
-                spring_indices.add((min(e.o0, e.o1), max(e.o0, e.o1)))
-                spring_indices.add((min(e.o0, e.v0), max(e.o0, e.v0)))
-                spring_indices.add((min(e.o0, e.v1), max(e.o0, e.v1)))
+            spring_indices.add((min(e.o0, e.o1), max(e.o0, e.o1)))
+            spring_indices.add((min(e.o0, e.v0), max(e.o0, e.v0)))
+            spring_indices.add((min(e.o0, e.v1), max(e.o0, e.v1)))
 
-                spring_indices.add((min(e.o1, e.v0), max(e.o1, e.v0)))
-                spring_indices.add((min(e.o1, e.v1), max(e.o1, e.v1)))
+            spring_indices.add((min(e.o1, e.v0), max(e.o1, e.v0)))
+            spring_indices.add((min(e.o1, e.v1), max(e.o1, e.v1)))
 
-                spring_indices.add((min(e.v0, e.v1), max(e.v0, e.v1)))
+            spring_indices.add((min(e.v0, e.v1), max(e.v0, e.v1)))
 
         if add_springs:
             for i, j in spring_indices:
