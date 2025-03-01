@@ -1,7 +1,9 @@
 <p align="center">
-    <a href= "https://pypi.org/project/rewarped/">
+    <a href="https://github.com/astral-sh/ruff">
+    <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" /></a>
+    <a href="https://pypi.org/project/rewarped/">
     <img src="https://img.shields.io/pypi/v/rewarped" /></a>
-    <a href= "https://arxiv.org/abs/2412.12089">
+    <a href="https://arxiv.org/abs/2412.12089">
     <img src="https://img.shields.io/badge/arxiv-2412.12089-b31b1b" /></a>
 </p>
 
