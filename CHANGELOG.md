@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased -
+- Add `warp_examples.granular`
 - Add `warp_examples.quadruped`
 
 ## 1.3.3 - 2025-03-13
