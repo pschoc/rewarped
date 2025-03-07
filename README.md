@@ -80,13 +80,13 @@ python -m mineral.scripts.run \
       <a href="./rewarped/envs/dexdeform/flip.py"><img src="./docs/assets/handflip.png"/></a>
     </td>
     <td>
-      <a href="./rewarped/envs/softgym/transport.py"><img src="./docs/assets/fluidtransport.png"/></a>
+      <a href="./rewarped/envs/softgym/transport.py"><img src="./docs/assets/fluidmove.png"/></a>
     </td>
   </tr>
   <tr>
     <td align="center">gradsim &#8226; SoftJumper</td>
     <td align="center">dexdeform &#8226; HandFlip</td>
-    <td align="center">softgym &#8226; FluidTransport</td>
+    <td align="center">softgym &#8226; FluidMove</td>
   </tr>
 </tbody>
 </table>
