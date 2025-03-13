@@ -35,7 +35,7 @@ GitHub = "https://github.com/rewarped/rewarped"
 include = ["rewarped*"]
 
 [tool.setuptools.package-data]
-rewarped = ["**/*.yml", "**/*.yaml"]
+rewarped = ["assets/**", "**/*.yml", "**/*.yaml"]
 
 [tool.setuptools.dynamic]
 version = { file = ["VERSION"] }
