@@ -896,7 +896,7 @@ class MPMInitData(object):
     ind_vel: np.ndarray = None
     env_id: int = 0
 
-    asset_root = Path(__file__).resolve().parent.parent.parent.parent / 'assets' / 'warp_mpm_sga'
+    asset_root = Path(__file__).resolve().parent.parent.parent / 'assets' / 'warp_mpm_sga'
 
     def __post_init__(self) -> None:
         if self.center is None:

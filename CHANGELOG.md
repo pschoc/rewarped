@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased -
+- Fix MPM asset root path and missing DexDeform asset ([GH-17](https://github.com/rewarped/rewarped/issues/17))
 
 ## 1.3.1 - 2025-03-01
 - Fix `warp_examples.cloth_throw` regression with `ModelBuilder.add_cloth_grid()`

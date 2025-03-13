@@ -34,6 +34,9 @@ GitHub = "https://github.com/rewarped/rewarped"
 [tool.setuptools.packages.find]
 include = ["rewarped*"]
 
+[tool.setuptools.package-data]
+rewarped = ["**/*.yml", "**/*.yaml"]
+
 [tool.setuptools.dynamic]
 version = { file = ["VERSION"] }
 readme = { file = ["README.md"], content-type = "text/markdown" }
