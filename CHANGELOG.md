@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased -
+
+## 1.3.3 - 2025-03-13
 - Fix MPM asset root path and missing DexDeform asset ([GH-17](https://github.com/rewarped/rewarped/issues/17))
 
 ## 1.3.1 - 2025-03-01
