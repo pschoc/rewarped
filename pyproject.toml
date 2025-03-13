@@ -7,7 +7,7 @@ name = "rewarped"
 authors = [{ name = "rewarped contributors", email = "etaoxing@users.noreply.github.com" }]
 requires-python = ">=3.10"
 description = "A platform for reinforcement learning in differentiable multiphysics simulation"
-license = {file = "LICENSE"}
+license = { text = "Apache License 2.0" }
 classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
