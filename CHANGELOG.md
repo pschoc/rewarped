@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased -
+- Add `warp_examples.quadruped`
 
 ## 1.3.3 - 2025-03-13
 - Fix MPM asset root path and missing DexDeform asset ([GH-17](https://github.com/rewarped/rewarped/issues/17))

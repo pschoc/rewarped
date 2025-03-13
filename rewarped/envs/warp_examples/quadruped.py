@@ -19,62 +19,61 @@
 import math
 import os
 
-import numpy as np
+import torch
 
 import warp as wp
 import warp.examples
-import warp.sim
-import warp.sim.render
+
+from ...environment import IntegratorType, run_env
+from ...warp_env import WarpEnv
 
 
-# Taken from env/environment.py
-def compute_env_offsets(num_envs, env_offset=(5.0, 0.0, 5.0), up_axis="Y"):
-    # compute positional offsets per environment
-    env_offset = np.array(env_offset)
-    nonzeros = np.nonzero(env_offset)[0]
-    num_dim = nonzeros.shape[0]
-    if num_dim > 0:
-        side_length = int(np.ceil(num_envs ** (1.0 / num_dim)))
-        env_offsets = []
-    else:
-        env_offsets = np.zeros((num_envs, 3))
-    if num_dim == 1:
-        for i in range(num_envs):
-            env_offsets.append(i * env_offset)
-    elif num_dim == 2:
-        for i in range(num_envs):
-            d0 = i // side_length
-            d1 = i % side_length
-            offset = np.zeros(3)
-            offset[nonzeros[0]] = d0 * env_offset[nonzeros[0]]
-            offset[nonzeros[1]] = d1 * env_offset[nonzeros[1]]
-            env_offsets.append(offset)
-    elif num_dim == 3:
-        for i in range(num_envs):
-            d0 = i // (side_length * side_length)
-            d1 = (i // side_length) % side_length
-            d2 = i % side_length
-            offset = np.zeros(3)
-            offset[0] = d0 * env_offset[0]
-            offset[1] = d1 * env_offset[1]
-            offset[2] = d2 * env_offset[2]
-            env_offsets.append(offset)
-    env_offsets = np.array(env_offsets)
-    min_offsets = np.min(env_offsets, axis=0)
-    correction = min_offsets + (np.max(env_offsets, axis=0) - min_offsets) / 2.0
-    if isinstance(up_axis, str):
-        up_axis = "XYZ".index(up_axis.upper())
-    correction[up_axis] = 0.0  # ensure the envs are not shifted below the ground plane
-    env_offsets -= correction
-    return env_offsets
+class Quadruped(WarpEnv):
+    sim_name = "Quadruped" + "WarpExamples"
+    env_offset = (0.0, 0.0, 1.0)
 
+    # integrator_type = IntegratorType.EULER
+    # sim_substeps_euler = 16
+    # euler_settings = dict(angular_damping=0.0)
+    # joint_attach_ke = 16000.0
+    # joint_attach_kd = 200.0
 
-class Example:
-    def __init__(self, stage_path="example_quadruped.usd", num_envs=8):
-        articulation_builder = wp.sim.ModelBuilder()
+    integrator_type = IntegratorType.FEATHERSTONE
+    sim_substeps_featherstone = 16
+    featherstone_settings = dict(angular_damping=0.0, update_mass_matrix_every=sim_substeps_featherstone)
+
+    eval_fk = True
+    eval_ik = False
+
+    frame_dt = 1.0 / 100.0
+    up_axis = "Y"
+    ground_plane = True
+
+    state_tensors_names = ("joint_q", "joint_qd")
+    control_tensors_names = ("joint_act",)
+
+    def __init__(self, num_envs=8, episode_length=300, early_termination=False, control_type="pos", **kwargs):
+        num_obs = 0
+        num_act = 12
+        super().__init__(num_envs, num_obs, num_act, episode_length, early_termination, **kwargs)
+
+        self.control_type = control_type
+        if control_type == "pos":
+            self.action_scale = 1.0
+        elif control_type == "force":
+            self.action_scale = 50.0
+        else:
+            raise ValueError(control_type)
+
+    def create_modelbuilder(self):
+        builder = super().create_modelbuilder()
+        builder.rigid_contact_margin = 0.05
+        return builder
+
+    def create_articulation(self, builder):
         wp.sim.parse_urdf(
             os.path.join(warp.examples.get_asset_directory(), "quadruped.urdf"),
-            articulation_builder,
+            builder,
             xform=wp.transform([0.0, 0.7, 0.0], wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -math.pi * 0.5)),
             floating=True,
             density=1000,
@@ -89,105 +88,65 @@ class Example:
             limit_kd=1.0e1,
         )
 
-        builder = wp.sim.ModelBuilder()
+        builder.joint_q[-12:] = [0.2, 0.4, -0.6, -0.2, -0.4, 0.6, -0.2, 0.4, -0.6, 0.2, -0.4, 0.6]
 
-        self.sim_time = 0.0
-        fps = 100
-        self.frame_dt = 1.0 / fps
-
-        self.sim_substeps = 5
-        self.sim_dt = self.frame_dt / self.sim_substeps
-
-        self.num_envs = num_envs
-
-        offsets = compute_env_offsets(self.num_envs)
-        for i in range(self.num_envs):
-            builder.add_builder(articulation_builder, xform=wp.transform(offsets[i], wp.quat_identity()))
-
-            builder.joint_q[-12:] = [0.2, 0.4, -0.6, -0.2, -0.4, 0.6, -0.2, 0.4, -0.6, 0.2, -0.4, 0.6]
-
-            builder.joint_axis_mode = [wp.sim.JOINT_MODE_TARGET_POSITION] * len(builder.joint_axis_mode)
+        if self.control_type == "pos":
             builder.joint_act[-12:] = [0.2, 0.4, -0.6, -0.2, -0.4, 0.6, -0.2, 0.4, -0.6, 0.2, -0.4, 0.6]
-
-        np.set_printoptions(suppress=True)
-        # finalize model
-        self.model = builder.finalize()
-        self.model.ground = True
-        # self.model.gravity = 0.0
-
-        self.model.joint_attach_ke = 16000.0
-        self.model.joint_attach_kd = 200.0
-
-        # self.integrator = wp.sim.XPBDIntegrator()
-        # self.integrator = wp.sim.SemiImplicitIntegrator()
-        self.integrator = wp.sim.FeatherstoneIntegrator(self.model)
-
-        if stage_path:
-            self.renderer = wp.sim.render.SimRenderer(self.model, stage_path)
+            builder.joint_axis_mode = [wp.sim.JOINT_MODE_TARGET_POSITION] * len(builder.joint_axis_mode)
+        elif self.control_type == "force":
+            builder.joint_act[-12:] = [0.0] * 12
+            builder.joint_axis_mode = [wp.sim.JOINT_MODE_FORCE] * len(builder.joint_axis_mode)
         else:
-            self.renderer = None
+            raise ValueError(self.control_type)
 
-        self.state_0 = self.model.state()
-        self.state_1 = self.model.state()
+    def init_sim(self):
+        super().init_sim()
+        # self.print_model_info()
 
-        wp.sim.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, None, self.state_0)
+        with torch.no_grad():
+            self.joint_act = wp.to_torch(self.model.joint_act).view(self.num_envs, -1).clone()
+            self.joint_act_indices = ...
 
-        # simulate() allocates memory via a clone, so we can't use graph capture if the device does not support mempools
-        self.use_cuda_graph = wp.get_device().is_cuda and wp.is_mempool_enabled(wp.get_device())
-        if self.use_cuda_graph:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
 
-    def simulate(self):
-        for _ in range(self.sim_substeps):
-            self.state_0.clear_forces()
-            wp.sim.collide(self.model, self.state_0)
-            self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+    @torch.no_grad()
+    def randomize_init(self, env_ids):
+        pass
 
-    def step(self):
-        with wp.ScopedTimer("step"):
-            if self.use_cuda_graph:
-                wp.capture_launch(self.graph)
+    def pre_physics_step(self, actions):
+        actions = actions.view(self.num_envs, -1)
+        actions = torch.clip(actions, -1.0, 1.0)
+        self.actions = actions
+        acts = self.action_scale * actions
+
+        if self.control_type == "pos":
+            self.control.assign("joint_act", wp.to_torch(self.model.joint_act).clone().flatten())
+        elif self.control_type == "force":
+            if self.joint_act_indices is ...:
+                self.control.assign("joint_act", acts.flatten())
             else:
-                self.simulate()
-        self.sim_time += self.frame_dt
+                joint_act = self.scatter_actions(self.joint_act, self.joint_act_indices, acts)
+                self.control.assign("joint_act", joint_act.flatten())
+        else:
+            raise ValueError(self.control_type)
 
-    def render(self):
-        if self.renderer is None:
-            return
+    def compute_observations(self):
+        self.obs_buf = {}
 
-        with wp.ScopedTimer("render"):
-            self.renderer.begin_frame(self.sim_time)
-            self.renderer.render(self.state_0)
-            self.renderer.end_frame()
+    def compute_reward(self):
+        rew = torch.zeros(self.num_envs, device=self.device)
+
+        reset_buf, progress_buf = self.reset_buf, self.progress_buf
+        max_episode_steps, early_termination = self.episode_length, self.early_termination
+        truncated = progress_buf > max_episode_steps - 1
+        reset = torch.where(truncated, torch.ones_like(reset_buf), reset_buf)
+        if early_termination:
+            raise NotImplementedError
+        else:
+            terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
+        self.rew_buf, self.reset_buf, self.terminated_buf, self.truncated_buf = rew, reset, terminated, truncated
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
-    parser.add_argument(
-        "--stage_path",
-        type=lambda x: None if x == "None" else str(x),
-        default="example_quadruped.usd",
-        help="Path to the output USD file.",
-    )
-    parser.add_argument("--num_frames", type=int, default=300, help="Total number of frames.")
-    parser.add_argument("--num_envs", type=int, default=8, help="Total number of simulated environments.")
-
-    args = parser.parse_known_args()[0]
-
-    with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.stage_path, num_envs=args.num_envs)
-
-        for _ in range(args.num_frames):
-            example.step()
-            example.render()
-
-        if example.renderer:
-            example.renderer.save()
+    run_env(Quadruped)
