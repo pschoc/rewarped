@@ -35,6 +35,7 @@ class IntegratorType(Enum):
     EULER = "euler"
     FEATHERSTONE = "featherstone"
     XPBD = "xpbd"
+    VBD = "vbd"
     MPM = "mpm"
 
     def __str__(self):
@@ -108,6 +109,7 @@ class Environment:
     sim_substeps_euler: int = 16
     sim_substeps_featherstone: int = 16
     sim_substeps_xpbd: int = 5
+    sim_substeps_vbd: int = 5
     sim_substeps_mpm: int = 16
 
     euler_settings = dict(angular_damping=0.05, friction_smoothing=1.0)
@@ -126,6 +128,17 @@ class Environment:
         rigid_contact_con_weighting=True,
         angular_damping=0.0,
         enable_restitution=False,
+    )
+    vbd_settings = dict(
+        iterations=10,
+        handle_self_contact=False,
+        penetration_free_conservative_bound_relaxation=0.42,
+        friction_epsilon=1e-2,
+        body_particle_contact_buffer_pre_alloc=4,
+        vertex_collision_buffer_pre_alloc=32,
+        edge_collision_buffer_pre_alloc=64,
+        triangle_collision_buffer_pre_alloc=32,
+        edge_edge_parallel_epsilon=1e-5,
     )
     mpm_settings = dict()
 
@@ -321,6 +334,9 @@ class Environment:
         elif self.integrator_type == IntegratorType.XPBD:
             sim_substeps = self.sim_substeps_xpbd
             integrator = wp.sim.XPBDIntegrator(**self.xpbd_settings)
+        elif self.integrator_type == IntegratorType.VBD:
+            sim_substeps = self.sim_substeps_vbd
+            integrator = wp.sim.VBDIntegrator(model, **self.vbd_settings)
         elif self.integrator_type == IntegratorType.MPM:
             sim_substeps = self.sim_substeps_mpm
             integrator = wp.sim.MPMIntegrator(model, **self.mpm_settings)
