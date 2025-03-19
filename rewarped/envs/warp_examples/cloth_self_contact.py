@@ -1,40 +1,17 @@
-# from https://github.com/NVIDIA/warp/blob/release-1.7/warp/examples/sim/example_cloth_self_contact.py
-
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-###########################################################################
-# Example Sim Cloth Self Contact
-#
-# This simulation demonstrates twisting an FEM cloth model using the VBD
-# integrator, showcasing its ability to handle complex self-contacts while
-# ensuring it remains intersection-free.
-#
-###########################################################################
-
-import math
 import os
+import math
 
 import numpy as np
+import torch
 from pxr import Usd, UsdGeom
 
 import warp as wp
 import warp.examples
 import warp.sim
-import warp.sim.render
 from warp.sim.model import PARTICLE_FLAG_ACTIVE
+
+from ...environment import IntegratorType, run_env
+from ...warp_env import WarpEnv
 
 
 @wp.kernel
@@ -122,36 +99,55 @@ def apply_rotation(
         t[0] = cur_t + dt
 
 
-class Example:
-    def __init__(self, stage_path="example_cloth_self_contact.usd", num_frames=600):
-        fps = 60
-        self.frame_dt = 1.0 / fps
-        # must be an even number when using CUDA Graph
-        self.num_substeps = 10
-        self.iterations = 4
-        self.dt = self.frame_dt / self.num_substeps
+class ClothSelfContact(WarpEnv):
+    sim_name = "ClothSelfContact" + "WarpExamples"
+    env_offset = (5.0, 0.0, 0.0)
 
-        self.num_frames = num_frames
-        self.sim_time = 0.0
-        self.profiler = {}
+    integrator_type = IntegratorType.VBD
+    sim_substeps_vbd = 10
+    vbd_settings = dict(
+        iterations=4,
+        handle_self_contact=True,
+    )
 
+    eval_fk = True
+    eval_ik = False
+
+    frame_dt = 1.0 / 60.0
+    up_axis = "Y"
+    ground_plane = False
+
+    state_tensors_names = ("particle_q", "particle_qd")
+
+    def __init__(self, num_envs=1, episode_length=300, early_termination=False, **kwargs):
+        num_obs = 0
+        num_act = 0
+        super().__init__(num_envs, num_obs, num_act, episode_length, early_termination, **kwargs)
+
+        # TODO: support parallel envs in apply_rotation
+        if self.num_envs != 1:
+            raise NotImplementedError
+
+        self.action_scale = 1.0
         self.rot_angular_velocity = math.pi / 3
         self.rot_end_time = 10
-        self.use_cuda_graph = wp.get_device().is_cuda
 
+    def create_env(self, builder):
+        self.create_cloth(builder)
+
+    def create_cloth(self, builder):
         usd_stage = Usd.Stage.Open(os.path.join(warp.examples.get_asset_directory(), "square_cloth.usd"))
         usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/cloth/cloth"))
 
         mesh_points = np.array(usd_geom.GetPointsAttr().Get())
         mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
 
-        self.input_scale_factor = 1.0
-        self.renderer_scale_factor = 0.01
+        input_scale_factor = 1.0
+        renderer_scale_factor = 0.01
 
-        vertices = [wp.vec3(v) * self.input_scale_factor for v in mesh_points]
-        self.faces = mesh_indices.reshape(-1, 3)
+        vertices = [wp.vec3(v) * input_scale_factor for v in mesh_points]
+        faces = mesh_indices.reshape(-1, 3)
 
-        builder = wp.sim.ModelBuilder()
         builder.add_cloth_mesh(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),
@@ -166,159 +162,123 @@ class Example:
             edge_ke=10,
         )
         builder.color()
-        self.model = builder.finalize()
-        self.model.ground = False
-        self.model.soft_contact_ke = 1.0e5
-        self.model.soft_contact_kd = 1.0e-6
-        self.model.soft_contact_mu = 0.2
+
+    def create_model(self):
+        model = super().create_model()
+        model.soft_contact_ke = 1.0e5
+        model.soft_contact_kd = 1.0e-6
+        model.soft_contact_mu = 0.2
 
         # set up contact query and contact detection distances
-        self.model.soft_contact_radius = 0.2
-        self.model.soft_contact_margin = 0.35
+        model.soft_contact_radius = 0.2
+        model.soft_contact_margin = 0.35
 
-        cloth_size = 50
-        left_side = [cloth_size - 1 + i * cloth_size for i in range(cloth_size)]
-        right_side = [i * cloth_size for i in range(cloth_size)]
-        rot_point_indices = left_side + right_side
+        return model
 
-        if len(rot_point_indices):
-            flags = self.model.particle_flags.numpy()
-            for fixed_vertex_id in rot_point_indices:
-                flags[fixed_vertex_id] = wp.uint32(int(flags[fixed_vertex_id]) & ~int(PARTICLE_FLAG_ACTIVE))
+    def init_sim(self):
+        super().init_sim()
+        # self.print_model_info()
 
-            self.model.particle_flags = wp.array(flags)
+        # Create the CUDA graph. We first manually load the necessary
+        # modules to avoid the capture to load all the modules that are
+        # registered and possibly not relevant.
+        wp.load_module(device=self.device)
+        wp.set_module_options({"block_dim": 256}, warp.sim.integrator_vbd)
+        wp.load_module(module=warp.sim, device=self.device, recursive=True)
 
-        self.integrator = wp.sim.VBDIntegrator(
-            self.model,
-            self.iterations,
-            handle_self_contact=True,
-        )
-        self.state0 = self.model.state()
-        self.state1 = self.model.state()
+        with torch.no_grad():
+            cloth_size = 50
+            left_side = [cloth_size - 1 + i * cloth_size for i in range(cloth_size)]
+            right_side = [i * cloth_size for i in range(cloth_size)]
+            rot_point_indices = left_side + right_side
 
-        rot_axes = [[1, 0, 0]] * len(right_side) + [[-1, 0, 0]] * len(left_side)
+            if len(rot_point_indices):
+                flags = self.model.particle_flags.numpy()
+                for fixed_vertex_id in rot_point_indices:
+                    flags[fixed_vertex_id] = wp.uint32(int(flags[fixed_vertex_id]) & ~int(PARTICLE_FLAG_ACTIVE))
 
-        self.rot_point_indices = wp.array(rot_point_indices, dtype=int)
-        self.t = wp.zeros((1,), dtype=float)
-        self.rot_centers = wp.zeros(len(rot_point_indices), dtype=wp.vec3)
-        self.rot_axes = wp.array(rot_axes, dtype=wp.vec3)
+                self.model.particle_flags = wp.array(flags)
 
-        self.roots = wp.zeros_like(self.rot_centers)
-        self.roots_to_ps = wp.zeros_like(self.rot_centers)
+            rot_axes = [[1, 0, 0]] * len(right_side) + [[-1, 0, 0]] * len(left_side)
 
-        wp.launch(
-            kernel=initialize_rotation,
-            dim=self.rot_point_indices.shape[0],
-            inputs=[
-                self.rot_point_indices,
-                self.state0.particle_q,
-                self.rot_centers,
-                self.rot_axes,
-                self.t,
-            ],
-            outputs=[
-                self.roots,
-                self.roots_to_ps,
-            ],
-        )
+            self.rot_point_indices = wp.array(rot_point_indices, dtype=int)
+            self.t = wp.zeros((1,), dtype=float)
+            self.rot_centers = wp.zeros(len(rot_point_indices), dtype=wp.vec3)
+            self.rot_axes = wp.array(rot_axes, dtype=wp.vec3)
 
-        if stage_path:
-            self.renderer = wp.sim.render.SimRenderer(self.model, stage_path, scaling=1)
+            self.roots = wp.zeros_like(self.rot_centers)
+            self.roots_to_ps = wp.zeros_like(self.rot_centers)
+
+            wp.launch(
+                kernel=initialize_rotation,
+                dim=self.rot_point_indices.shape[0],
+                inputs=[
+                    self.rot_point_indices,
+                    self.state_0.particle_q,
+                    self.rot_centers,
+                    self.rot_axes,
+                    self.t,
+                ],
+                outputs=[
+                    self.roots,
+                    self.roots_to_ps,
+                ],
+            )
+
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+
+    @torch.no_grad()
+    def randomize_init(self, env_ids):
+        pass
+
+    def pre_physics_step(self, actions):
+        actions = actions.view(self.num_envs, -1)
+        actions = torch.clip(actions, -1.0, 1.0)
+        self.actions = actions
+        acts = self.action_scale * actions
+
+    def do_physics_step(self):
+        # TODO: graph capture
+        for i in range(self.sim_substeps):
+            wp.launch(
+                kernel=apply_rotation,
+                dim=self.rot_point_indices.shape[0],
+                inputs=[
+                    self.rot_point_indices,
+                    self.rot_axes,
+                    self.roots,
+                    self.roots_to_ps,
+                    self.t,
+                    self.rot_angular_velocity,
+                    self.sim_dt,
+                    self.rot_end_time,
+                ],
+                outputs=[
+                    self.state_0.particle_q,
+                    self.state_1.particle_q,
+                ],
+            )
+
+            self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
+
+    def compute_observations(self):
+        self.obs_buf = {}
+
+    def compute_reward(self):
+        rew = torch.zeros(self.num_envs, device=self.device)
+
+        reset_buf, progress_buf = self.reset_buf, self.progress_buf
+        max_episode_steps, early_termination = self.episode_length, self.early_termination
+        truncated = progress_buf > max_episode_steps - 1
+        reset = torch.where(truncated, torch.ones_like(reset_buf), reset_buf)
+        if early_termination:
+            raise NotImplementedError
         else:
-            self.renderer = None
-        self.cuda_graph = None
-        if self.use_cuda_graph:
-            with wp.ScopedCapture() as capture:
-                for _ in range(self.num_substeps):
-                    wp.launch(
-                        kernel=apply_rotation,
-                        dim=self.rot_point_indices.shape[0],
-                        inputs=[
-                            self.rot_point_indices,
-                            self.rot_axes,
-                            self.roots,
-                            self.roots_to_ps,
-                            self.t,
-                            self.rot_angular_velocity,
-                            self.dt,
-                            self.rot_end_time,
-                        ],
-                        outputs=[
-                            self.state0.particle_q,
-                            self.state1.particle_q,
-                        ],
-                    )
-
-                    self.integrator.simulate(self.model, self.state0, self.state1, self.dt, None)
-                    (self.state0, self.state1) = (self.state1, self.state0)
-
-            self.cuda_graph = capture.graph
-
-    def step(self):
-        with wp.ScopedTimer("step", print=False, dict=self.profiler):
-            if self.use_cuda_graph:
-                wp.capture_launch(self.cuda_graph)
-            else:
-                for _ in range(self.num_substeps):
-                    wp.launch(
-                        kernel=apply_rotation,
-                        dim=self.rot_point_indices.shape[0],
-                        inputs=[
-                            self.rot_point_indices,
-                            self.rot_axes,
-                            self.roots,
-                            self.roots_to_ps,
-                            self.t,
-                            self.rot_angular_velocity,
-                            self.dt,
-                            self.rot_end_time,
-                        ],
-                        outputs=[
-                            self.state0.particle_q,
-                            self.state1.particle_q,
-                        ],
-                    )
-                    self.integrator.simulate(self.model, self.state0, self.state1, self.dt)
-
-                    (self.state0, self.state1) = (self.state1, self.state0)
-
-            self.sim_time += self.dt
-
-    def render(self):
-        if self.renderer is None:
-            return
-
-        with wp.ScopedTimer("render", print=False):
-            self.renderer.begin_frame(self.sim_time)
-            self.renderer.render(self.state0)
-            self.renderer.end_frame()
+            terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
+        self.rew_buf, self.reset_buf, self.terminated_buf, self.truncated_buf = rew, reset, terminated, truncated
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--device", type=str, default=None, help="Override the default Warp device.")
-    parser.add_argument(
-        "--stage_path",
-        type=lambda x: None if x == "None" else str(x),
-        default="example_cloth_self_contact.usd",
-        help="Path to the output USD file.",
-    )
-    parser.add_argument("--num_frames", type=int, default=300, help="Total number of frames.")
-
-    args = parser.parse_known_args()[0]
-
-    with wp.ScopedDevice(args.device):
-        example = Example(stage_path=args.stage_path, num_frames=args.num_frames)
-
-        for i in range(example.num_frames):
-            example.step()
-            example.render()
-            print(f"[{i:4d}/{example.num_frames}]")
-
-        frame_times = example.profiler["step"]
-        print("\nAverage frame sim time: {:.2f} ms".format(sum(frame_times) / len(frame_times)))
-
-        if example.renderer:
-            example.renderer.save()
+    run_env(ClothSelfContact)
