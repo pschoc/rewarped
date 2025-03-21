@@ -51,9 +51,10 @@ extend-exclude = [
     "__pycache__",
     "docs",
     "build",
-    "assets",
     "third_party",
     # Rewarped
+    "rewarped/assets",
+    "rewarped/data",
     "rewarped/warp_mpm_sga",
     "rewarped/envs/legged_gym/configs",
 ]

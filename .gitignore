@@ -1,6 +1,7 @@
 # rewarped
 data/
 outputs/
+rewarped/data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

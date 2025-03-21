@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased -
+- Add `Environment.data_dir` param, defaults to `rewarped/data/`
 - Move `Environment.update()` impl. to `warp_utils.sim_update_inplace()`
 - Add `warp_examples.granular`
 - Add `warp_examples.quadruped`

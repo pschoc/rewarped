@@ -186,6 +186,7 @@ class Environment:
     separate_collision_group_per_env: bool = True
 
     asset_dir = os.path.join(os.path.dirname(__file__), "assets")
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
     render_dir = None
 
     def __init__(self):
