@@ -492,6 +492,9 @@ class Environment:
             # print("particle_qd", self.model.particle_qd.numpy())
             # print("particle_mass", self.model.particle_mass.numpy())
             # print("particle_radius", self.model.particle_radius.numpy())
+            print("edge_count", self.model.edge_count)
+            print("tri_count", self.model.tri_count)
+            print("spring_count", self.model.spring_count)
         print()
 
     def parse_args(self):
