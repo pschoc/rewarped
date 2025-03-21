@@ -19,7 +19,7 @@ import warp as wp
 import warp.sim
 import warp.sim.render
 
-from .warp_utils import eval_kinematic_fk
+from .warp_utils import sim_update_inplace
 
 
 class RenderMode(Enum):
@@ -402,18 +402,17 @@ class Environment:
         return self.control_0
 
     def update(self):
-        control = self.control_0
-        for i in range(self.sim_substeps):
-            if self.kinematic_fk:
-                eval_kinematic_fk(self.model, self.state_0, self.state_1, self.sim_dt, self.sim_substeps, control)
-
-            self.state_0.clear_forces()
-            wp.sim.collide(self.model, self.state_0)
-            self.integrator.simulate(self.model, self.state_0, self.state_1, self.sim_dt, control=control)
-            self.state_0, self.state_1 = self.state_1, self.state_0
-
-        if self.eval_ik:
-            wp.sim.eval_ik(self.model, self.state_0, self.state_0.joint_q, self.state_0.joint_qd)
+        sim_params = (self.kinematic_fk, self.eval_ik)
+        self.state_0, self.state_1 = sim_update_inplace(
+            self.model,
+            self.integrator,
+            self.state_0,
+            self.state_1,
+            self.sim_dt,
+            self.sim_substeps,
+            self.control_0,
+            sim_params,
+        )
 
     def render(self, state=None):
         if self.renderer is not None:

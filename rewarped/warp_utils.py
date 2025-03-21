@@ -46,3 +46,21 @@ def sim_update(update_params, sim_params, states, control):
 
     if eval_ik:
         wp.sim.eval_ik(model, state_out, state_out.joint_q, state_out.joint_qd)
+
+
+def sim_update_inplace(model, integrator, state_0, state_1, sim_dt, sim_substeps, control, sim_params):
+    kinematic_fk, eval_ik = sim_params
+
+    for i in range(sim_substeps):
+        if kinematic_fk:
+            eval_kinematic_fk(model, state_0, state_1, sim_dt, sim_substeps, control)
+
+        state_0.clear_forces()
+        wp.sim.collide(model, state_0)
+        integrator.simulate(model, state_0, state_1, sim_dt, control=control)
+        state_0, state_1 = state_1, state_0
+
+    if eval_ik:
+        wp.sim.eval_ik(model, state_0, state_0.joint_q, state_0.joint_qd)
+
+    return state_0, state_1

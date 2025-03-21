@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased -
+- Move `Environment.update()` impl. to `warp_utils.sim_update_inplace()`
 - Add `warp_examples.granular`
 - Add `warp_examples.quadruped`
 
