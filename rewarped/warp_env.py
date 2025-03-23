@@ -386,7 +386,7 @@ class WarpEnv(Environment):
         if self.requires_grad or self.use_graph_capture:
             tape = self.tape
             update_params = (tape, self.integrator, self.model, self.use_graph_capture, self.synchronize)
-            sim_params = (self.sim_substeps, self.sim_dt, self.kinematic_fk, self.eval_ik)
+            sim_params = (self.sim_substeps, self.sim_dt, self.eval_kinematic_fk, self.eval_ik)
 
             if self.requires_grad:
                 state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known

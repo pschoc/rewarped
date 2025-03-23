@@ -152,8 +152,8 @@ class Environment:
 
     # whether to apply model.joint_q, joint_qd to bodies before simulating
     eval_fk: bool = True
-    # whether to set state.body_q based on state.joint_q
-    kinematic_fk: bool = False
+    # whether to directly set state.body_q based on state.joint_q
+    eval_kinematic_fk: bool = False
     # whether to update state.joint_q, state.joint_qd
     eval_ik: bool = False
 
@@ -403,7 +403,7 @@ class Environment:
         return self.control_0
 
     def update(self):
-        sim_params = (self.kinematic_fk, self.eval_ik)
+        sim_params = (self.eval_kinematic_fk, self.eval_ik)
         self.state_0, self.state_1 = sim_update_inplace(
             self.model,
             self.integrator,

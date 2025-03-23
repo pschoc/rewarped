@@ -19,7 +19,7 @@ class RollingPin(MPMWarpEnvMixin, WarpEnv):
     sim_substeps_mpm = 40
 
     eval_fk = True
-    kinematic_fk = True
+    eval_kinematic_fk = True
     eval_ik = False
 
     up_axis = "Y"
@@ -193,7 +193,7 @@ class RollingPin(MPMWarpEnvMixin, WarpEnv):
         self.actions = actions
         acts = self.action_scale * actions
 
-        if self.kinematic_fk:
+        if self.eval_kinematic_fk:
             # ensure joint limit
             joint_q = self.state.joint_q.clone().view(self.num_envs, -1)
             joint_q = joint_q.detach()

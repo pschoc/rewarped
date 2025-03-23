@@ -46,7 +46,7 @@ class UpdateFunction(torch.autograd.Function):
         *tensors,
     ):
         tape, integrator, model, use_graph_capture, synchronize = update_params
-        sim_substeps, sim_dt, kinematic_fk, eval_ik = sim_params
+        sim_substeps, sim_dt, eval_kinematic_fk, eval_ik = sim_params
         state_in, states_mid, state_out = states
         state_in_bwd, states_mid_bwd, state_out_bwd = states_bwd
 
@@ -143,7 +143,7 @@ class UpdateFunction(torch.autograd.Function):
         control_tensors = ctx.control_tensors
 
         tape, integrator, model, use_graph_capture, synchronize = update_params
-        sim_substeps, sim_dt, kinematic_fk, eval_ik = sim_params
+        sim_substeps, sim_dt, eval_kinematic_fk, eval_ik = sim_params
         state_in, states_mid, state_out = states
         state_in_bwd, states_mid_bwd, state_out_bwd = states_bwd
 
