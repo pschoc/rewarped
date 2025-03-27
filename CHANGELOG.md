@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased -
+- Change `Environment.render()` to use `state or self.state_0`
 - Rename `kinematic_fk` to `eval_kinematic_fk`
 - Add edge_count, tri_count, spring_count to `Environment.print_model_info()`
 - Add `Environment.data_dir` param, defaults to `rewarped/data/`

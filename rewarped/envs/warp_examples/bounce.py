@@ -141,8 +141,7 @@ class Bounce(WarpEnv):
         if not self.render_traj:
             super().render(state)
         else:
-            # render state 1 (swapped with state 0 just before)
-            state = state or self.state_1
+            state = state or self.state_0
             traj_vert = self.state.particle_q.view(self.num_envs, -1, 3)[:, 0, :].tolist()
             self.traj_verts.append(traj_vert)
 

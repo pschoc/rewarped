@@ -888,19 +888,18 @@ class AllegroHand(WarpEnv):
             with wp.ScopedTimer("render", False):
                 self.render_time += self.frame_dt
                 self.renderer.begin_frame(self.render_time)
-                # render state 1 (swapped with state 0 just before)
-                self.renderer.render(state or self.state_1)
+                self.renderer.render(state or self.state_0)
                 self.render_transforms(state=state)
                 self.render_goal(state=state)
                 self.renderer.end_frame()
 
     def render_transforms(self, state=None):
-        state = state or self.state_1
+        state = state or self.state_0
 
         # TODO: render arrows
 
     def render_goal(self, state=None):
-        state = state or self.state_1
+        state = state or self.state_0
 
         # TODO: render goal object
 

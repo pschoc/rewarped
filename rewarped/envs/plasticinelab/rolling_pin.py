@@ -258,9 +258,8 @@ class RollingPin(MPMWarpEnvMixin, WarpEnv):
             with wp.ScopedTimer("render", False):
                 self.render_time += self.frame_dt
                 self.renderer.begin_frame(self.render_time)
-                # render state 1 (swapped with state 0 just before)
-                self.renderer.render(state or self.state_1)
-                self.render_mpm(state=state)
+                self.renderer.render(state or self.state_0)
+                self.render_mpm(state)
                 self.renderer.end_frame()
 
     def run_cfg(self):
