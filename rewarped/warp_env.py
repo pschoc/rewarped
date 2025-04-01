@@ -340,8 +340,10 @@ class WarpEnv(Environment):
         self.progress_buf = self.progress_buf.detach().clone()
 
         for k, v in checkpoint["state"].items():
+            v.requires_grad_()
             self.state.assign(k, v)
         for k, v in checkpoint["control"].items():
+            v.requires_grad_()
             self.control.assign(k, v)
 
     def get_checkpoint(self, detach=False):
