@@ -207,7 +207,7 @@ class Environment:
         if not self.model.device.is_cuda:
             self.use_graph_capture = False
 
-        self.sim_substeps, self.integrator = self.create_integrator(self.model)
+        self.sim_substeps, self.integrator_settings, self.integrator = self.create_integrator(self.model)
 
         self.episode_frames = int(self.episode_duration / self.frame_dt)
         self.sim_dt = self.frame_dt / self.sim_substeps
@@ -328,22 +328,27 @@ class Environment:
     def create_integrator(self, model):
         if self.integrator_type == IntegratorType.EULER:
             sim_substeps = self.sim_substeps_euler
-            integrator = wp.sim.SemiImplicitIntegrator(**self.euler_settings)
+            integrator_settings = self.euler_settings
+            integrator = wp.sim.SemiImplicitIntegrator(**integrator_settings)
         elif self.integrator_type == IntegratorType.FEATHERSTONE:
             sim_substeps = self.sim_substeps_featherstone
-            integrator = wp.sim.FeatherstoneIntegrator(model, **self.featherstone_settings)
+            integrator_settings = self.featherstone_settings
+            integrator = wp.sim.FeatherstoneIntegrator(model, **integrator_settings)
         elif self.integrator_type == IntegratorType.XPBD:
             sim_substeps = self.sim_substeps_xpbd
-            integrator = wp.sim.XPBDIntegrator(**self.xpbd_settings)
+            integrator_settings = self.xpbd_settings
+            integrator = wp.sim.XPBDIntegrator(**integrator_settings)
         elif self.integrator_type == IntegratorType.VBD:
             sim_substeps = self.sim_substeps_vbd
-            integrator = wp.sim.VBDIntegrator(model, **self.vbd_settings)
+            integrator_settings = self.vbd_settings
+            integrator = wp.sim.VBDIntegrator(model, **integrator_settings)
         elif self.integrator_type == IntegratorType.MPM:
             sim_substeps = self.sim_substeps_mpm
-            integrator = wp.sim.MPMIntegrator(model, **self.mpm_settings)
+            integrator_settings = self.mpm_settings
+            integrator = wp.sim.MPMIntegrator(model, **integrator_settings)
         else:
             raise NotImplementedError(self.integrator_type)
-        return sim_substeps, integrator
+        return sim_substeps, integrator_settings, integrator
 
     def create_renderer(self):
         if self.render_dir is not None:
@@ -403,16 +408,12 @@ class Environment:
         return self.control_0
 
     def update(self):
-        sim_params = (self.eval_kinematic_fk, self.eval_ik)
+        sim_params = (self.integrator, self.sim_substeps, self.sim_dt, self.eval_kinematic_fk, self.eval_ik)
         self.state_0, self.state_1 = sim_update_inplace(
-            self.model,
-            self.integrator,
-            self.state_0,
-            self.state_1,
-            self.sim_dt,
-            self.sim_substeps,
-            self.control_0,
             sim_params,
+            self.model,
+            (self.state_0, self.state_1),
+            self.control_0,
         )
 
     def render(self, state=None):

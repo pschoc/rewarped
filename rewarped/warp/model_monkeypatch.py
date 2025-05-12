@@ -1,5 +1,3 @@
-import types
-
 import warp as wp
 from warp.sim.model import Control, Model, State
 
@@ -15,10 +13,11 @@ def get_copy_fn(copy):
         raise ValueError(copy)
 
 
-def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=None) -> State:
+def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=None, integrator_settings=None) -> State:
     s = State()
     if requires_grad is None:
         requires_grad = self.requires_grad
+    device = self.device
 
     # s.requires_grad = requires_grad
     # s.particle_count = self.particle_count
@@ -65,26 +64,26 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
             s.joint_S_s = wp.empty(
                 (self.joint_dof_count,),
                 dtype=wp.spatial_vector,
-                device=self.device,
+                device=device,
                 requires_grad=requires_grad,
             )
 
             # derived rigid body data (maximal coordinates)
             B = self.body_count
-            s.body_q_com = wp.empty((B,), dtype=wp.transform, device=self.device, requires_grad=requires_grad)
-            s.body_I_s = wp.empty((B,), dtype=wp.spatial_matrix, device=self.device, requires_grad=requires_grad)
-            s.body_v_s = wp.empty((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
-            s.body_a_s = wp.empty((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
-            s.body_f_s = wp.zeros((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
-            s.body_ft_s = wp.zeros((B,), dtype=wp.spatial_vector, device=self.device, requires_grad=requires_grad)
+            s.body_q_com = wp.empty((B,), dtype=wp.transform, device=device, requires_grad=requires_grad)
+            s.body_I_s = wp.empty((B,), dtype=wp.spatial_matrix, device=device, requires_grad=requires_grad)
+            s.body_v_s = wp.empty((B,), dtype=wp.spatial_vector, device=device, requires_grad=requires_grad)
+            s.body_a_s = wp.empty((B,), dtype=wp.spatial_vector, device=device, requires_grad=requires_grad)
+            s.body_f_s = wp.zeros((B,), dtype=wp.spatial_vector, device=device, requires_grad=requires_grad)
+            s.body_ft_s = wp.zeros((B,), dtype=wp.spatial_vector, device=device, requires_grad=requires_grad)
 
         # allocate mass, Jacobian matrices, and other auxiliary variables pertaining to the model
         if self.joint_count:
             # system matrices
-            s.M = wp.zeros((self.fs_M_size,), dtype=wp.float32, device=self.device, requires_grad=requires_grad)
-            s.J = wp.zeros((self.fs_J_size,), dtype=wp.float32, device=self.device, requires_grad=requires_grad)
+            s.M = wp.zeros((self.fs_M_size,), dtype=wp.float32, device=device, requires_grad=requires_grad)
+            s.J = wp.zeros((self.fs_J_size,), dtype=wp.float32, device=device, requires_grad=requires_grad)
             s.P = wp.empty_like(s.J, requires_grad=requires_grad)
-            s.H = wp.empty((self.fs_H_size,), dtype=wp.float32, device=self.device, requires_grad=requires_grad)
+            s.H = wp.empty((self.fs_H_size,), dtype=wp.float32, device=device, requires_grad=requires_grad)
 
             # zero since only upper triangle is set which can trigger NaN detection
             s.L = wp.zeros_like(s.H)

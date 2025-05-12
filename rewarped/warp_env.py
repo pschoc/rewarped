@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import torch
 from gym import spaces
@@ -22,54 +24,32 @@ def scatter_clone(input, index, src, dim: int = -1):
     return out
 
 
-class StateTensors:
-    r"""Simple wrapper around `wp.sim.State()` to access `state_tensors` as attributes.
+class WarpTensors:
+    r"""Simple wrapper around `wp.sim.State()` or `Control()` or `Model()`, to access `tensors` as attributes.
 
-    Note that `state_tensors` are returned by `torch.autograd.Function.apply`, since
-    currently `wp.to_torch(wp.from_torch(state_tensor)))` breaks the compute graph.
+    Note that `tensors` are returned by `torch.autograd.Function.apply`, since
+    currently `wp.to_torch(wp.from_torch(tensor)))` breaks the compute graph.
     """
 
-    def __init__(self, state, state_tensors_names, state_tensors):
-        self.state = state
-        self.state_tensors_names = state_tensors_names
-        self.state_tensors = state_tensors
+    def __init__(self, data, tensors_names, tensors):
+        self.data = data
+        self.tensors_names = tensors_names
+        self.tensors = tensors
 
     def assign(self, name, tensor):
-        if self.state_tensors is not None and name in self.state_tensors_names:
-            idx = self.state_tensors_names.index(name)
-            self.state_tensors[idx] = tensor
-            # setattr(self.state, name, wp.from_torch(tensor, dtype=getattr(self.state, name).dtype))
-            getattr(self.state, name).assign(wp.from_torch(tensor))
+        if self.tensors is not None and name in self.tensors_names:
+            idx = self.tensors_names.index(name)
+            self.tensors[idx] = tensor
+            # setattr(self.data, name, wp.from_torch(tensor, dtype=getattr(self.data, name).dtype))
+            getattr(self.data, name).assign(wp.from_torch(tensor))
         else:
-            getattr(self.state, name).assign(wp.from_torch(tensor))
+            getattr(self.data, name).assign(wp.from_torch(tensor))
 
     def __getattr__(self, name):
-        if self.state_tensors is not None and name in self.state_tensors_names:
-            idx = self.state_tensors_names.index(name)
-            return self.state_tensors[idx]
-        return wp.to_torch(getattr(self.state, name))
-
-
-class ControlTensors:
-    def __init__(self, control, control_tensors_names, control_tensors):
-        self.control = control
-        self.control_tensors_names = control_tensors_names
-        self.control_tensors = control_tensors
-
-    def assign(self, name, tensor):
-        if self.control_tensors is not None and name in self.control_tensors_names:
-            idx = self.control_tensors_names.index(name)
-            self.control_tensors[idx] = tensor
-            # setattr(self.control, name, wp.from_torch(tensor, dtype=getattr(self.control, name).dtype))
-            getattr(self.control, name).assign(wp.from_torch(tensor))
-        else:
-            getattr(self.control, name).assign(wp.from_torch(tensor))
-
-    def __getattr__(self, name):
-        if self.control_tensors is not None and name in self.control_tensors_names:
-            idx = self.control_tensors_names.index(name)
-            return self.control_tensors[idx]
-        return wp.to_torch(getattr(self.control, name))
+        if self.tensors is not None and name in self.tensors_names:
+            idx = self.tensors_names.index(name)
+            return self.tensors[idx]
+        return wp.to_torch(getattr(self.data, name))
 
 
 class WarpEnv(Environment):
@@ -109,6 +89,7 @@ class WarpEnv(Environment):
     ```
     """
 
+    model_tensors_names = ()
     state_tensors_names = ()
     control_tensors_names = ()
 
@@ -183,8 +164,8 @@ class WarpEnv(Environment):
 
         self.num_obs = num_obs
         self.num_act = num_act
-        self.obs_space = spaces.Box(np.ones(self.num_obs) * -np.inf, np.ones(self.num_obs) * np.inf)
-        self.act_space = spaces.Box(np.ones(self.num_act) * -1.0, np.ones(self.num_act) * 1.0)
+        self.obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_obs,), dtype=np.float32)
+        self.act_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_act,), dtype=np.float32)
 
         self.scatter_actions = staticmethod(scatter_clone)  # alias for convenience
 
@@ -213,12 +194,16 @@ class WarpEnv(Environment):
         return self.episode_length
 
     @property
+    def model_data(self):  # not naming as just `model` since it's more than a dataclass, ie. `model.fn()`
+        return WarpTensors(self.model, self.model_tensors_names, self.model_tensors)
+
+    @property
     def state(self):
-        return StateTensors(self.state_0, self.state_tensors_names, self.state_tensors)
+        return WarpTensors(self.state_0, self.state_tensors_names, self.state_tensors)
 
     @property
     def control(self):
-        return ControlTensors(self.control_0, self.control_tensors_names, self.control_tensors)
+        return WarpTensors(self.control_0, self.control_tensors_names, self.control_tensors)
 
     @property
     def requires_grad(self):
@@ -259,7 +244,11 @@ class WarpEnv(Environment):
         model = super().create_model()
 
         def model_state_fn(model, *args, **kwargs):
-            return Model_state(model, *args, integrator_type=self.integrator_type.value, **kwargs)
+            integrator_type = self.integrator_type.value
+            integrator_settings = self.integrator_settings
+            return Model_state(
+                model, *args, integrator_type=integrator_type, integrator_settings=integrator_settings, **kwargs
+            )
 
         # monkeypatch model.state() function
         model.state = model_state_fn.__get__(model, model.__class__)
@@ -290,15 +279,24 @@ class WarpEnv(Environment):
             if self.requires_grad:
                 assert self.model.requires_grad
 
+                self.model_tensors = [wp.to_torch(getattr(self.model, k)) for k in self.model_tensors_names]
                 self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
                 self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
             else:
-                self.state_tensors_names, self.control_tensors_names = [], []
-                self.state_tensors = []
-                self.control_tensors = []
+                self.model_tensors_names, self.model_tensors = [], []
+                self.state_tensors_names, self.state_tensors = [], []
+                self.control_tensors_names, self.control_tensors = [], []
 
             if self.use_graph_capture:
                 self.tape = wp.Tape()  # persistent tape for graph capture
+
+                # shallow copy
+                # TODO: need a better day to have separate copies when not using graph capture (for randomization)
+                self.model_bwd = copy.copy(self.model)
+                for k in self.model_tensors_names:
+                    v = getattr(self.model_bwd, k)
+                    v = wp.zeros_like(v, requires_grad=self.requires_grad)
+                    setattr(self.model_bwd, k, v)
 
                 self.state_0_bwd = self.model.state(copy="zeros")
                 self.state_1_bwd = self.model.state(copy="zeros")
@@ -310,6 +308,7 @@ class WarpEnv(Environment):
                 self.integrator.bwd_update_graph = None
         else:
             self.integrator.update_graph = None
+            self.model_tensors = None
             self.state_tensors = None
             self.control_tensors = None
         print(f"grads: {self.requires_grad}, graph_capture: {self.use_graph_capture}, synchronize: {self.synchronize}")
@@ -339,6 +338,9 @@ class WarpEnv(Environment):
         self.truncated_buf = self.truncated_buf.detach().clone()
         self.progress_buf = self.progress_buf.detach().clone()
 
+        for k, v in checkpoint["model_data"].items():
+            v.requires_grad_()
+            self.model_data.assign(k, v)
         for k, v in checkpoint["state"].items():
             v.requires_grad_()
             self.state.assign(k, v)
@@ -350,7 +352,12 @@ class WarpEnv(Environment):
         if not self.initialized:
             raise RuntimeError("WarpEnv is not initialized, call reset() first")
 
-        checkpoint = {"state": {}, "control": {}}
+        checkpoint = {"model_data": {}, "state": {}, "control": {}}
+        for k in self.model_tensors_names:
+            v = getattr(self.model_data, k)
+            if detach:
+                v = v.detach()
+            checkpoint["model_data"][k] = v.clone()
         for k in self.state_tensors_names:
             v = getattr(self.state, k)
             if detach:
@@ -387,8 +394,8 @@ class WarpEnv(Environment):
     def do_physics_step(self):
         if self.requires_grad or self.use_graph_capture:
             tape = self.tape
-            update_params = (tape, self.integrator, self.model, self.use_graph_capture, self.synchronize)
-            sim_params = (self.sim_substeps, self.sim_dt, self.eval_kinematic_fk, self.eval_ik)
+            autograd_params = (tape, self.use_graph_capture, self.synchronize)
+            sim_params = (self.integrator, self.sim_substeps, self.sim_dt, self.eval_kinematic_fk, self.eval_ik)
 
             if self.requires_grad:
                 state_1 = self.model.state(copy="zeros")  # TODO: could cache these if optim window is known
@@ -399,44 +406,57 @@ class WarpEnv(Environment):
                 states_mid = self.states_mid
 
                 assert tape is not None
+                model_bwd = self.model_bwd
                 states_bwd = (self.state_0_bwd, self.states_mid_bwd, self.state_1_bwd)
                 control_bwd = self.control_0_bwd
             else:
                 # states_mid = self.states_mid
                 states_mid = [self.model.state(copy="zeros") for _ in range(self.sim_substeps - 1)]
 
+                model_bwd = None
                 states_bwd = (None, None, None)
                 control_bwd = None
 
+            model = self.model
             states = (self.state_0, states_mid, state_1)
             control = self.control_0
 
             if self.requires_grad:
-                tensors = tuple(self.state_tensors + self.control_tensors)
+                tensors = tuple(self.model_tensors + self.state_tensors + self.control_tensors)
                 outputs = UpdateFunction.apply(
-                    update_params,
+                    autograd_params,
                     sim_params,
+                    model,
                     states,
                     control,
+                    model_bwd,
                     states_bwd,
                     control_bwd,
+                    self.model_tensors_names,
                     self.state_tensors_names,
                     self.control_tensors_names,
                     *tensors,
                 )
-                num_state = len(self.state_tensors_names)
-                self.state_tensors = list(outputs[:num_state])
+
+                M = len(self.model_tensors_names)
+                S = len(self.state_tensors_names)
+                C = len(self.control_tensors_names)
+                i, j, k = M, M + S, M + S + C
+                self.state_tensors = list(outputs[i:j])
             else:
                 ctx = torch.autograd.function.FunctionCtx()
-                state_tensors_names, control_tensors_names = [], []
+                model_tensors_names, state_tensors_names, control_tensors_names = [], [], []
                 outputs = UpdateFunction.forward(
                     ctx,
-                    update_params,
+                    autograd_params,
                     sim_params,
+                    model,
                     states,
                     control,
+                    model_bwd,
                     states_bwd,
                     control_bwd,
+                    model_tensors_names,
                     state_tensors_names,
                     control_tensors_names,
                 )
@@ -492,8 +512,8 @@ class WarpEnv(Environment):
     def reset_idx(self, env_ids):
         if self.early_termination:
             prev_action = self.actions
-            prev_state = StateTensors(self.state_0, self.state_tensors_names, self.state_tensors)
-            # prev_control = ControlTensors(self.control_0, self.control_tensors_names, self.control_tensors)
+            prev_state = WarpTensors(self.state_0, self.state_tensors_names, self.state_tensors)
+            # prev_control = WarpTensors(self.control_0, self.control_tensors_names, self.control_tensors)
         else:
             assert len(env_ids) == self.num_envs
         self.actions = torch.zeros((self.num_envs, self.num_actions), dtype=torch.float, device=self.device)
@@ -502,6 +522,7 @@ class WarpEnv(Environment):
         # self.state_0.clear_forces()
         # self.control_0.clear()
         if self.requires_grad:
+            self.model_tensors = [wp.to_torch(getattr(self.model, k)) for k in self.model_tensors_names]
             self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
             self.control_tensors = [wp.to_torch(getattr(self.control_0, k)) for k in self.control_tensors_names]
 
@@ -534,6 +555,8 @@ class WarpEnv(Environment):
                     else:
                         attr = attr.index_copy(0, prev_env_ids, prev_attr[prev_env_ids])
                         x.assign(name, attr.reshape(shape))
+
+                # TODO: model_data?
 
                 # TODO: Add fn to get wp.array attributes instead of vars(..)
                 for name in vars(self.state_0):

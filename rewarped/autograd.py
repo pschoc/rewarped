@@ -16,7 +16,7 @@ def assign_tensors(x, x_out, names, tensors):
         if isinstance(attr, wp.array):
             wp_array = getattr(x_out, name)
             wp_array.assign(attr)
-    for name, tensor in zip(names, tensors):
+    for name, tensor in zip(names, tensors, strict=True):
         # assert not torch.isnan(tensor).any(), print("NaN tensor", name)
         wp_array = getattr(x_out, name)
         wp_array.assign(wp.from_torch(tensor, dtype=wp_array.dtype))
@@ -24,7 +24,7 @@ def assign_tensors(x, x_out, names, tensors):
 
 def assign_adjoints(x, names, adj_tensors):
     # register outputs with tape
-    for name, adj_tensor in zip(names, adj_tensors):
+    for name, adj_tensor in zip(names, adj_tensors, strict=True):
         # assert not torch.isnan(adj_tensor).any(), print("NaN adj", name)
         wp_array = getattr(x, name)
         # wp_array.grad = wp.from_torch(adj_tensor, dtype=wp_array.dtype)
@@ -32,26 +32,36 @@ def assign_adjoints(x, names, adj_tensors):
 
 
 class UpdateFunction(torch.autograd.Function):
+    """Custom torch autograd fn for `warp.sim.integrator.simulate()`."""
+
     @staticmethod
     def forward(
         ctx,
-        update_params,
+        autograd_params,
         sim_params,
+        model,
         states,
         control,
+        model_bwd,
         states_bwd,
         control_bwd,
+        model_tensors_names,
         state_tensors_names,
         control_tensors_names,
         *tensors,
     ):
-        tape, integrator, model, use_graph_capture, synchronize = update_params
-        sim_substeps, sim_dt, eval_kinematic_fk, eval_ik = sim_params
+        tape, use_graph_capture, synchronize = autograd_params
+        integrator, sim_substeps, sim_dt, eval_kinematic_fk, eval_ik = sim_params
         state_in, states_mid, state_out = states
         state_in_bwd, states_mid_bwd, state_out_bwd = states_bwd
 
-        num_state = len(state_tensors_names)
-        state_tensors, control_tensors = tensors[:num_state], tensors[num_state:]
+        M = len(model_tensors_names)
+        S = len(state_tensors_names)
+        C = len(control_tensors_names)
+        i, j, k = M, M + S, M + S + C
+        model_tensors = tensors[:i]
+        state_tensors = tensors[i:j]
+        control_tensors = tensors[j:k]
 
         if synchronize:
             # ensure Torch operations complete before running Warp
@@ -59,7 +69,7 @@ class UpdateFunction(torch.autograd.Function):
 
         if tape is None:
             tape = wp.Tape()
-            update_params = (tape, *update_params[1:])
+            autograd_params = (tape, *autograd_params[1:])
 
         # for name in vars(model):
         #     attr = getattr(model, name)
@@ -67,20 +77,24 @@ class UpdateFunction(torch.autograd.Function):
         #         # print(name)
         #         attr.requires_grad = True
 
-        ctx.update_params = update_params
+        ctx.autograd_params = autograd_params
         ctx.sim_params = sim_params
+        ctx.model = model
         ctx.states = states
         ctx.control = control
+        ctx.model_bwd = model_bwd
         ctx.states_bwd = states_bwd
         ctx.control_bwd = control_bwd
+        ctx.model_tensors_names = model_tensors_names
         ctx.state_tensors_names = state_tensors_names
         ctx.control_tensors_names = control_tensors_names
+        ctx.model_tensors = model_tensors
         ctx.state_tensors = state_tensors
         ctx.control_tensors = control_tensors
 
         if use_graph_capture:
-            if getattr(integrator, "update_graph", None) is None:
-                assert getattr(integrator, "bwd_update_graph", None) is None
+            if getattr(tape, "update_graph", None) is None:
+                assert getattr(tape, "bwd_update_graph", None) is None
 
                 device = wp.get_device()
                 # make torch use the warp stream from the given device
@@ -91,59 +105,71 @@ class UpdateFunction(torch.autograd.Function):
                     wp.capture_begin(force_module_load=False)
                     try:
                         with tape:
-                            sim_update(update_params, sim_params, states_bwd, control_bwd)
+                            sim_update(sim_params, model_bwd, states_bwd, control_bwd)
                     finally:
-                        integrator.update_graph = wp.capture_end()
+                        tape.update_graph = wp.capture_end()
 
                     wp.capture_begin(force_module_load=False)
                     try:
                         tape.backward()
                     finally:
-                        integrator.bwd_update_graph = wp.capture_end()
+                        tape.bwd_update_graph = wp.capture_end()
 
+            assign_tensors(model, model_bwd, model_tensors_names, model_tensors)
             assign_tensors(state_in, state_in_bwd, state_tensors_names, state_tensors)
             assign_tensors(control, control_bwd, control_tensors_names, control_tensors)
-            wp.capture_launch(integrator.update_graph)
+            wp.capture_launch(tape.update_graph)
             assign_tensors(state_out_bwd, state_out, [], [])  # write to state_out
         else:
             with tape:
-                sim_update(update_params, sim_params, states, control)
+                sim_update(sim_params, model, states, control)
 
         if synchronize:
             # ensure Warp operations complete before returning data to Torch
             wp.synchronize_device()
 
+        # TODO: not clong right now, since these should be static?
         outputs = []
-        for name in state_tensors_names:
-            out_tensor = wp.to_torch(getattr(state_out, name))
+        for name in model_tensors_names:
+            out_tensor = wp.to_torch(getattr(model, name))
             # assert not torch.isnan(out_tensor).any(), print("NaN fwd", name)
-            if use_graph_capture:
-                out_tensor = out_tensor.clone()
+            # if use_graph_capture:
+            #     out_tensor = out_tensor.clone()
             outputs.append(out_tensor)
-        for name in control_tensors_names:
-            out_tensor = wp.to_torch(getattr(control, name))
-            # assert not torch.isnan(out_tensor).any(), print("NaN fwd", name)
-            if use_graph_capture:
-                out_tensor = out_tensor.clone()
-            outputs.append(out_tensor)
+
+        for data, tensors_names in zip(
+            (state_out, control),
+            (state_tensors_names, control_tensors_names),
+            strict=True,
+        ):
+            for name in tensors_names:
+                out_tensor = wp.to_torch(getattr(data, name))
+                # assert not torch.isnan(out_tensor).any(), print("NaN fwd", name)
+                if use_graph_capture:
+                    out_tensor = out_tensor.clone()
+                outputs.append(out_tensor)
 
         return tuple(outputs)
 
     @staticmethod
     def backward(ctx, *adj_tensors):
-        update_params = ctx.update_params
+        autograd_params = ctx.autograd_params
         sim_params = ctx.sim_params
+        model = ctx.model
         states = ctx.states
         control = ctx.control
+        model_bwd = ctx.model_bwd
         states_bwd = ctx.states_bwd
         control_bwd = ctx.control_bwd
+        model_tensors_names = ctx.model_tensors_names
         state_tensors_names = ctx.state_tensors_names
         control_tensors_names = ctx.control_tensors_names
+        model_tensors = ctx.model_tensors
         state_tensors = ctx.state_tensors
         control_tensors = ctx.control_tensors
 
-        tape, integrator, model, use_graph_capture, synchronize = update_params
-        sim_substeps, sim_dt, eval_kinematic_fk, eval_ik = sim_params
+        tape, use_graph_capture, synchronize = autograd_params
+        integrator, sim_substeps, sim_dt, eval_kinematic_fk, eval_ik = sim_params
         state_in, states_mid, state_out = states
         state_in_bwd, states_mid_bwd, state_out_bwd = states_bwd
 
@@ -157,8 +183,13 @@ class UpdateFunction(torch.autograd.Function):
         # ensure grads are contiguous in memory
         adj_tensors = [adj_tensor.contiguous() for adj_tensor in adj_tensors]
 
-        num_state = len(state_tensors_names)
-        adj_state_tensors, adj_control_tensors = adj_tensors[:num_state], adj_tensors[num_state:]
+        M = len(model_tensors_names)
+        S = len(state_tensors_names)
+        C = len(control_tensors_names)
+        i, j, k = M, M + S, M + S + C
+        adj_model_tensors = adj_tensors[:i]
+        adj_state_tensors = adj_tensors[i:j]
+        adj_control_tensors = adj_tensors[j:k]
 
         if synchronize:
             # ensure Torch operations complete before running Warp
@@ -166,20 +197,24 @@ class UpdateFunction(torch.autograd.Function):
 
         if use_graph_capture:
             # checkpointing method
+            assign_tensors(model, model_bwd, model_tensors_names, model_tensors)
             assign_tensors(state_in, state_in_bwd, state_tensors_names, state_tensors)
             assign_tensors(control, control_bwd, control_tensors_names, control_tensors)
-            wp.capture_launch(integrator.update_graph)
+            wp.capture_launch(tape.update_graph)
 
+            assign_adjoints(model_bwd, model_tensors_names, adj_model_tensors)
             assign_adjoints(state_out_bwd, state_tensors_names, adj_state_tensors)
             assign_adjoints(control_bwd, control_tensors_names, adj_control_tensors)
-            wp.capture_launch(integrator.bwd_update_graph)
+            wp.capture_launch(tape.bwd_update_graph)
             assert len(tape.gradients) > 0
         else:
+            assign_adjoints(model, model_tensors_names, adj_model_tensors)
             assign_adjoints(state_out, state_tensors_names, adj_state_tensors)
             assign_adjoints(control, control_tensors_names, adj_control_tensors)
             tape.backward()
 
         if use_graph_capture:
+            model = model_bwd
             state_in, state_out = state_in_bwd, state_out_bwd
             control = control_bwd
 
@@ -189,32 +224,24 @@ class UpdateFunction(torch.autograd.Function):
 
         try:
             adj_inputs = []
-            for name in state_tensors_names:
-                grad = tape.gradients[getattr(state_in, name)]
-                # adj_tensor = wp.to_torch(wp.clone(grad))
-                adj_tensor = wp.to_torch(grad).clone()
+            for data, tensors_names in zip(
+                (model, state_in, control),
+                (model_tensors_names, state_tensors_names, control_tensors_names),
+                strict=True,
+            ):
+                for name in tensors_names:
+                    grad = tape.gradients[getattr(data, name)]
+                    # adj_tensor = wp.to_torch(wp.clone(grad))
+                    adj_tensor = wp.to_torch(grad).clone()
 
-                if rescale_grad is not None:
-                    adj_tensor /= rescale_grad
-                if clip_grad is not None:
-                    adj_tensor = torch.nan_to_num(adj_tensor, nan=0.0, posinf=-clip_grad, neginf=clip_grad)
-                    adj_tensor = torch.clamp(adj_tensor, -clip_grad, clip_grad)
+                    if rescale_grad is not None:
+                        adj_tensor /= rescale_grad
+                    if clip_grad is not None:
+                        adj_tensor = torch.nan_to_num(adj_tensor, nan=0.0, neginf=-clip_grad, posinf=clip_grad)
+                        adj_tensor = torch.clamp(adj_tensor, -clip_grad, clip_grad)
 
-                # print(name, adj_tensor.norm(), adj_tensor)
-                adj_inputs.append(adj_tensor)
-            for name in control_tensors_names:
-                grad = tape.gradients[getattr(control, name)]
-                # adj_tensor = wp.to_torch(wp.clone(grad))
-                adj_tensor = wp.to_torch(grad).clone()
-
-                if rescale_grad is not None:
-                    adj_tensor /= rescale_grad
-                if clip_grad is not None:
-                    adj_tensor = torch.nan_to_num(adj_tensor, nan=0.0, posinf=-clip_grad, neginf=clip_grad)
-                    adj_tensor = torch.clamp(adj_tensor, -clip_grad, clip_grad)
-
-                # print(name, adj_tensor.norm(), adj_tensor)
-                adj_inputs.append(adj_tensor)
+                    # print(name, adj_tensor.norm(), adj_tensor)
+                    adj_inputs.append(adj_tensor)
         except KeyError as e:
             print(f"Missing gradient for {name}")
             raise e
@@ -228,12 +255,160 @@ class UpdateFunction(torch.autograd.Function):
         # return adjoint w.r.t inputs
         # None for each arg of forward() that is not ctx or *tensors
         return (
-            None,  # update_params,
+            None,  # autograd_params,
             None,  # sim_params,
+            None,  # model,
             None,  # states,
             None,  # control,
+            None,  # model_bwd,
             None,  # states_bwd,
             None,  # control_bwd,
+            None,  # model_tensors_names,
             None,  # state_tensors_names,
             None,  # control_tensors_names,
+        ) + tuple(adj_inputs)
+
+
+class WarpKernelsFunction(torch.autograd.Function):
+    """Custom torch autograd fn for arbitrary warp kernels.
+    Assumes only one fn call, unlike UpdateFunction `sim_update()` which loops over `Integrator.simulate()`.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        autograd_params,
+        fn,
+        fn_kwargs,
+        x,
+        y,
+        x_tensors_names,
+        y_tensors_names,
+        *tensors,
+    ):
+        tape, use_graph_capture, graph_params = autograd_params
+        x_bwd, y_bwd = graph_params
+
+        num_x = len(x_tensors_names)
+        x_tensors = tensors[:num_x]
+
+        if tape is None:
+            tape = wp.Tape()
+            autograd_params = (tape, *autograd_params[1:])
+
+        ctx.autograd_params = autograd_params
+        ctx.fn = fn
+        ctx.fn_kwargs = fn_kwargs
+        ctx.x = x
+        ctx.y = y
+        ctx.x_tensors_names = x_tensors_names
+        ctx.y_tensors_names = y_tensors_names
+        ctx.x_tensors = x_tensors
+
+        if use_graph_capture:
+            if getattr(tape, "update_graph", None) is None:
+                assert getattr(tape, "bwd_update_graph", None) is None
+
+                device = wp.get_device()
+                # make torch use the warp stream from the given device
+                torch_stream = wp.stream_to_torch(device)
+
+                # capture graph
+                with wp.ScopedDevice(device), torch.cuda.stream(torch_stream):
+                    wp.capture_begin(force_module_load=False)
+                    try:
+                        with tape:
+                            fn(x_bwd, y_bwd, **fn_kwargs)
+                    finally:
+                        tape.update_graph = wp.capture_end()
+
+                    wp.capture_begin(force_module_load=False)
+                    try:
+                        tape.backward()
+                    finally:
+                        tape.bwd_update_graph = wp.capture_end()
+
+            assign_tensors(x, x_bwd, x_tensors_names, x_tensors)
+            wp.capture_launch(tape.update_graph)
+            assign_tensors(y_bwd, y, [], [])  # write to state_out
+        else:
+            with tape:
+                fn(x, y, **fn_kwargs)
+
+        outputs = []
+        for name in y_tensors_names:
+            out_tensor = wp.to_torch(getattr(y, name))
+            # assert not torch.isnan(out_tensor).any(), print("NaN fwd", name)
+            if use_graph_capture:
+                out_tensor = out_tensor.clone()
+            outputs.append(out_tensor)
+        return tuple(outputs)
+
+    @staticmethod
+    def backward(ctx, *adj_tensors):
+        autograd_params = ctx.autograd_params
+        fn = ctx.fn
+        fn_kwargs = ctx.fn_kwargs
+        x = ctx.x
+        y = ctx.y
+        x_tensors_names = ctx.x_tensors_names
+        y_tensors_names = ctx.y_tensors_names
+        x_tensors = ctx.x_tensors
+
+        tape, use_graph_capture, graph_params = autograd_params
+        x_bwd, y_bwd = graph_params
+
+        # ensure grads are contiguous in memory
+        adj_tensors = [adj_tensor.contiguous() for adj_tensor in adj_tensors]
+
+        if use_graph_capture:
+            # checkpointing method
+            assign_tensors(x, x_bwd, x_tensors_names, x_tensors)
+            wp.capture_launch(tape.update_graph)
+
+            assign_adjoints(y_bwd, y_tensors_names, adj_tensors)
+            wp.capture_launch(tape.bwd_update_graph)
+            assert len(tape.gradients) > 0
+        else:
+            assign_adjoints(y, y_tensors_names, adj_tensors)
+            tape.backward()
+
+        if use_graph_capture:
+            x, y = x_bwd, y_bwd
+
+        adj_inputs = []
+        try:
+            for name in x_tensors_names:
+                grad = tape.gradients[getattr(x, name)]
+                # adj_tensor = wp.to_torch(wp.clone(grad))
+                adj_tensor = wp.to_torch(grad).clone()
+
+                # print(name, adj_tensor.norm(), adj_tensor)
+                adj_inputs.append(adj_tensor)
+
+            for name in y_tensors_names:
+                grad = tape.gradients[getattr(y, name)]
+                # adj_tensor = wp.to_torch(wp.clone(grad))
+                adj_tensor = wp.to_torch(grad).clone()
+
+                # print(name, adj_tensor.norm(), adj_tensor)
+                adj_inputs.append(adj_tensor)
+
+        except KeyError as e:
+            print(f"Missing gradient for {name}")
+            raise e
+
+        # zero gradients
+        tape.zero()
+
+        # return adjoint w.r.t inputs
+        # None for each arg of forward() that is not ctx or *tensors
+        return (
+            None,  # autograd_params,
+            None,  # fn,
+            None,  # fn_kwargs,
+            None,  # x,
+            None,  # y,
+            None,  # x_tensors_names,
+            None,  # y_tensors_names,
         ) + tuple(adj_inputs)
