@@ -6,16 +6,18 @@ from .warp_utils import sim_update
 
 
 # for checkpointing method
-def assign_tensors(x, x_out, names, tensors):
+def assign_tensors(x, x_out, names, tensors, view=False):
     # need to assign b/c state_0, state_1 cannot be swapped
+    # if view=True, then x == x_out except for tensors given by names, so we can skip assigning some
     # TODO: Add fn to get wp.array attributes instead of vars(..)
-    for name in vars(x):
-        if name in names:
-            continue
-        attr = getattr(x, name)
-        if isinstance(attr, wp.array):
-            wp_array = getattr(x_out, name)
-            wp_array.assign(attr)
+    if not view:
+        for name in vars(x):
+            if name in names:
+                continue
+            attr = getattr(x, name)
+            if isinstance(attr, wp.array):
+                wp_array = getattr(x_out, name)
+                wp_array.assign(attr)
     for name, tensor in zip(names, tensors, strict=True):
         # assert not torch.isnan(tensor).any(), print("NaN tensor", name)
         wp_array = getattr(x_out, name)
@@ -115,7 +117,7 @@ class UpdateFunction(torch.autograd.Function):
                     finally:
                         tape.bwd_update_graph = wp.capture_end()
 
-            assign_tensors(model, model_bwd, model_tensors_names, model_tensors)
+            assign_tensors(model, model_bwd, model_tensors_names, model_tensors, view=True)
             assign_tensors(state_in, state_in_bwd, state_tensors_names, state_tensors)
             assign_tensors(control, control_bwd, control_tensors_names, control_tensors)
             wp.capture_launch(tape.update_graph)
@@ -197,7 +199,7 @@ class UpdateFunction(torch.autograd.Function):
 
         if use_graph_capture:
             # checkpointing method
-            assign_tensors(model, model_bwd, model_tensors_names, model_tensors)
+            assign_tensors(model, model_bwd, model_tensors_names, model_tensors, view=True)
             assign_tensors(state_in, state_in_bwd, state_tensors_names, state_tensors)
             assign_tensors(control, control_bwd, control_tensors_names, control_tensors)
             wp.capture_launch(tape.update_graph)

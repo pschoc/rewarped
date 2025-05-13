@@ -1,5 +1,3 @@
-import copy
-
 import numpy as np
 import torch
 from gym import spaces
@@ -50,6 +48,23 @@ class WarpTensors:
             idx = self.tensors_names.index(name)
             return self.tensors[idx]
         return wp.to_torch(getattr(self.data, name))
+
+
+class BwdModelView:
+    def __init__(self, model, model_tensors_names):
+        self.model = model
+        self.model_tensors_names = model_tensors_names
+
+        self.bwd_tensors = {}
+        for k in model_tensors_names:
+            v = getattr(model, k)
+            v = wp.zeros_like(v, requires_grad=v.requires_grad)
+            self.bwd_tensors[k] = v
+
+    def __getattr__(self, name):
+        if name in self.model_tensors_names:
+            return self.bwd_tensors[name]
+        return getattr(self.model, name)
 
 
 class WarpEnv(Environment):
@@ -290,13 +305,8 @@ class WarpEnv(Environment):
             if self.use_graph_capture:
                 self.tape = wp.Tape()  # persistent tape for graph capture
 
-                # shallow copy
-                # TODO: need a better day to have separate copies when not using graph capture (for randomization)
-                self.model_bwd = copy.copy(self.model)
-                for k in self.model_tensors_names:
-                    v = getattr(self.model_bwd, k)
-                    v = wp.zeros_like(v, requires_grad=self.requires_grad)
-                    setattr(self.model_bwd, k, v)
+                # shallow copy of model with new arrays for `model_tensors`
+                self.model_bwd = BwdModelView(self.model, self.model_tensors_names)
 
                 self.state_0_bwd = self.model.state(copy="zeros")
                 self.state_1_bwd = self.model.state(copy="zeros")
