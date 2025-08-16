@@ -1,4 +1,5 @@
 import warp as wp
+import warp.sim  # ensure submodule is imported so wp.sim is available to static analyzers
 
 
 @wp.kernel
@@ -40,6 +41,13 @@ def sim_update(sim_params, model, states, control):
 
         state_0.clear_forces()
         wp.sim.collide(model, state_0)
+        # allow environments to add external (non-joint) forces after collisions
+        if hasattr(control, "apply_external_forces") and control.apply_external_forces is not None:
+            control.apply_external_forces(model, state_0, control)
+        if hasattr(control, "data") and hasattr(control.data, "apply_external_forces"):
+            control.data.apply_external_forces(model, state_0, control)
+        elif hasattr(control, "__dict__") and "apply_external_forces" in control.__dict__:
+            control.__dict__["apply_external_forces"](model, state_0, control)
         integrator.simulate(model, state_0, state_1, sim_dt, control=control)
         state_0 = state_1
 
@@ -57,6 +65,13 @@ def sim_update_inplace(sim_params, model, states, control):
 
         state_0.clear_forces()
         wp.sim.collide(model, state_0)
+        # allow environments to add external (non-joint) forces after collisions
+        if hasattr(control, "apply_external_forces") and control.apply_external_forces is not None:
+            control.apply_external_forces(model, state_0, control)
+        elif hasattr(control, "data") and hasattr(control.data, "apply_external_forces"):
+            control.data.apply_external_forces(model, state_0, control)
+        elif hasattr(control, "__dict__") and "apply_external_forces" in control.__dict__:
+            control.__dict__["apply_external_forces"](model, state_0, control)
         integrator.simulate(model, state_0, state_1, sim_dt, control=control)
         state_0, state_1 = state_1, state_0
 

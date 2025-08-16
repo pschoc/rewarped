@@ -2,6 +2,12 @@ import warp as wp
 from warp.sim.model import Control, Model, State
 
 
+# Minimal extension to allow environments to attach a callable that applies
+# external forces each substep (used for non-articulated control like drones).
+class ExternalControl(Control):
+    __slots__ = ("apply_external_forces",)
+
+
 def get_copy_fn(copy):
     if copy == "clone":
         return wp.clone  # NOTE: will copy array.grad, https://github.com/NVIDIA/warp/issues/272#issuecomment-2239791350
@@ -119,7 +125,8 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
 
 
 def Model_control(self: Model, requires_grad=None, clone_variables=True, copy="clone") -> Control:
-    c = Control()
+    # Use a thin subclass to optionally carry external-force callback
+    c = ExternalControl()
     if requires_grad is None:
         requires_grad = self.requires_grad
     if clone_variables and copy is not None:
@@ -138,5 +145,9 @@ def Model_control(self: Model, requires_grad=None, clone_variables=True, copy="c
         c.tri_activations = self.tri_activations
         c.tet_activations = self.tet_activations
         c.muscle_activations = self.muscle_activations
+
+    # If the model exposes an external force callback, pass it through
+    # so physics can call it each substep (see warp_utils.sim_update).
+    c.apply_external_forces = getattr(self, "apply_external_forces", None)
 
     return c

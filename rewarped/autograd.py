@@ -107,6 +107,9 @@ class UpdateFunction(torch.autograd.Function):
                     wp.capture_begin(force_module_load=False)
                     try:
                         with tape:
+                            # Copy external forces hook to control_bwd before graph capture
+                            if hasattr(control, 'apply_external_forces'):
+                                control_bwd.apply_external_forces = control.apply_external_forces
                             sim_update(sim_params, model_bwd, states_bwd, control_bwd)
                     finally:
                         tape.update_graph = wp.capture_end()
@@ -120,6 +123,9 @@ class UpdateFunction(torch.autograd.Function):
             assign_tensors(model, model_bwd, model_tensors_names, model_tensors, view=True)
             assign_tensors(state_in, state_in_bwd, state_tensors_names, state_tensors)
             assign_tensors(control, control_bwd, control_tensors_names, control_tensors)
+            # Copy external forces hook from control to control_bwd for graph capture
+            if hasattr(control, 'apply_external_forces'):
+                control_bwd.apply_external_forces = control.apply_external_forces
             wp.capture_launch(tape.update_graph)
             assign_tensors(state_out_bwd, state_out, [], [])  # write to state_out
         else:
@@ -252,7 +258,7 @@ class UpdateFunction(torch.autograd.Function):
         tape.zero()
 
         if zero_nans:
-            adj_inputs = [torch.nan_to_num_(adj_input, 0.0, 0.0, 0.0) for adj_input in adj_inputs]
+            adj_inputs = [torch.nan_to_num(adj_input, nan=0.0, posinf=0.0, neginf=0.0) for adj_input in adj_inputs]
 
         # return adjoint w.r.t inputs
         # None for each arg of forward() that is not ctx or *tensors
