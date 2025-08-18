@@ -161,10 +161,25 @@ class DroneParcour(WarpEnv):
         self.obstacle_min_size = kwargs.pop("obstacle_min_size", 0.2)
         self.obstacle_max_size = kwargs.pop("obstacle_max_size", 0.5)
         self.termination_distance = kwargs.pop("termination_distance", 0.1)
-        self.three_sigma_initial_attitude_deg = kwargs.pop("three_sigma_initial_attitude_deg", 10.0)  # 10 degrees
-        self.three_sigma_initial_lin_vel = kwargs.pop("three_sigma_initial_lin_vel", [0.5, 0.5, 0.5])  # [vx, vy, vz] in m/s
-        self.three_sigma_initial_ang_vel = kwargs.pop("three_sigma_initial_ang_vel", [0.1, 0.1, 0.1])  # [wx, wy, wz] in rad/s
-        
+
+        # spawning parameters
+        self.initial_drone_attitude_euler_deg = torch.tensor(kwargs.pop("initial_drone_attitude_euler_deg", [0.0, 0.0, 0.0]), device=device)  # [roll, pitch, yaw] in degrees
+        self.initial_drone_lin_vel = torch.tensor(kwargs.pop("initial_drone_lin_vel", [0.0, 0.0, 0.0]), device=device)  # [vx, vy, vz] in m/s
+        self.initial_drone_ang_vel = torch.tensor(kwargs.pop("initial_drone_ang_vel", [0.0, 0.0, 0.0]), device=device)  # [wx, wy, wz] in rad/s
+
+        self.three_sigma_initial_attitude_deg = torch.tensor(kwargs.pop("three_sigma_initial_attitude_deg", [10.0, 10.0, 10.0]), device=device)  # 10 degrees
+        self.three_sigma_initial_lin_vel = torch.tensor(kwargs.pop("three_sigma_initial_lin_vel", [0.5, 0.5, 0.5]), device=device)  # [vx, vy, vz] in m/s
+        self.three_sigma_initial_ang_vel = torch.tensor(kwargs.pop("three_sigma_initial_ang_vel", [0.1, 0.1, 0.1]), device=device)  # [wx, wy, wz] in rad/s
+
+        # target parameters
+        self.target_attitude_euler_deg = torch.tensor(kwargs.pop("target_attitude_euler_deg", [0.0, 0.0, 0.0]), device=device)  # [roll, pitch, yaw] in degrees
+        self.target_lin_vel = torch.tensor(kwargs.pop("target_lin_vel", [0.0, 0.0, 0.0]), device=device)  # [vx, vy, vz] in m/s
+        self.target_ang_vel = torch.tensor(kwargs.pop("target_ang_vel", [0.0, 0.0, 0.0]), device=device)  # [wx, wy, wz] in rad/s
+
+        self.three_sigma_target_attitude_deg = torch.tensor(kwargs.pop("three_sigma_target_attitude_deg", [0.0, 0.0, 0.0]), device=device)  # 0 degrees
+        self.three_sigma_target_lin_vel = torch.tensor(kwargs.pop("three_sigma_target_lin_vel", [0.0, 0.0, 0.0]), device=device)  # [vx, vy, vz] in m/s
+        self.three_sigma_target_ang_vel = torch.tensor(kwargs.pop("three_sigma_target_ang_vel", [0.0, 0.0, 0.0]), device=device)  # [wx, wy, wz] in rad/s
+
         # Drone construction parameters
         self.density_carbon = kwargs.pop("density_carbon", 1600.0)  # kg/m³
         self.density_aluminum = kwargs.pop("density_aluminum", 2700.0)  # kg/m³
@@ -371,7 +386,8 @@ class DroneParcour(WarpEnv):
             self.start_rotation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
 
             # Initialize target positions for each environment
-            self.targets = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+            self.target_body_q = torch.zeros((self.num_envs, 7), device=self.device, dtype=torch.float32)
+            self.target_body_qd = torch.zeros((self.num_envs, 6), device=self.device, dtype=torch.float32)
             self.reset_targets()
 
         # Provide an external-forces callback via the model so newly-created
@@ -532,34 +548,63 @@ class DroneParcour(WarpEnv):
             self.renderer.begin_frame(self.render_time)
             
             # Add custom target visualization if targets exist
-            if hasattr(self, 'targets'):
-                # Draw target spheres for each environment
-                for i in range(self.num_envs):  # Limit for performance
-                    target_pos = self.targets[i].cpu().numpy()  + self.env_offsets[i].cpu().numpy()
+            if hasattr(self, 'target_body_q'):
+                # Draw target coordinate frames for each environment
+                for i in range(self.num_envs):
+                    target_pos = self.target_body_q[i, :3].cpu().numpy() + self.env_offsets[i].cpu().numpy()
+                    target_quat = self.target_body_q[i, 3:7].cpu().numpy()  # [x, y, z, w]
+                              
+                    # Arrow dimensions
+                    base_radius = 0.05
+                    base_height = 0.3
+                    cap_radius = 0.08
+                    cap_height = 0.1
                     
-                    # Render target sphere using the renderer's render_sphere method
                     try:
-                        self.renderer.render_sphere(
-                            name=f"target_{i}",
+                        # X-axis arrow (red)
+                        self.renderer.render_arrow(
+                            name=f"target_x_{i}",
                             pos=tuple(target_pos),
-                            rot=(0.0, 0.0, 0.0, 1.0),  # Identity quaternion
-                            radius=0.08,  # Slightly larger for visibility
-                            color=(0.0, 1.0, 0.0),  # Green sphere
+                            rot=target_quat,
+                            base_radius=base_radius,
+                            base_height=base_height,
+                            cap_radius=cap_radius,
+                            cap_height=cap_height,
+                            up_axis=0,  # X-axis
+                            color=(1.0, 0.0, 0.0),  # Red
+                            visible=True
+                        )
+                        
+                        # Y-axis arrow (green) - points downward in warp coordinate system
+                        self.renderer.render_arrow(
+                            name=f"target_y_{i}",
+                            pos=tuple(target_pos),
+                            rot=target_quat,
+                            base_radius=base_radius,
+                            base_height=base_height,
+                            cap_radius=cap_radius,
+                            cap_height=cap_height,
+                            up_axis=1,  # Y-axis (downward)
+                            color=(0.0, 1.0, 0.0),  # Green
+                            visible=True
+                        )
+                        
+                        # Z-axis arrow (blue)
+                        self.renderer.render_arrow(
+                            name=f"target_z_{i}",
+                            pos=tuple(target_pos),
+                            rot=target_quat,
+                            base_radius=base_radius,
+                            base_height=base_height,
+                            cap_radius=cap_radius,
+                            cap_height=cap_height,
+                            up_axis=2,  # Z-axis
+                            color=(0.0, 0.0, 1.0),  # Blue
                             visible=True
                         )
                     except Exception as e:
-                        # If render_sphere fails, fall back to render_points
-                        try:
-                            self.renderer.render_points(
-                                name=f"target_points_{i}",
-                                points=target_pos.reshape(1, 3),
-                                radius=0.08,
-                                colors=(0.0, 1.0, 0.0),
-                                as_spheres=True,
-                                visible=True
-                            )
-                        except:
-                            pass  # If both methods fail, skip this target
+                        # If rendering fails, skip this target
+                        pass
             
             # Render the simulation state
             self.renderer.render(state or self.state_0)
@@ -570,17 +615,32 @@ class DroneParcour(WarpEnv):
 
     def reset_targets(self):
         """Reset target positions to random locations within target bounds"""
-        with torch.no_grad():
-            # Apply 0.9 scaling to target bounds
-            scaled_bounds = self.target_bounds
-            
+        with torch.no_grad():            
             # Generate random positions within scaled target bounds
             random_factors = torch.rand([self.num_envs, 3], device=self.device)
-            mins = scaled_bounds[:, 0]  # [x_min, y_min, z_min]
-            maxs = scaled_bounds[:, 1]  # [x_max, y_max, z_max]
+            mins = self.target_bounds[:, 0]  # [x_min, y_min, z_min]
+            maxs = self.target_bounds[:, 1]  # [x_max, y_max, z_max]
             ranges = maxs - mins        # [x_range, y_range, z_range]
             
-            self.targets[:, 0:3] = mins + random_factors * ranges
+            # generate random target attitudes            
+            randomized_target_orientation = self.target_attitude_euler_deg.repeat(self.num_envs, 1) / 180.0 * math.pi
+            randomized_target_orientation += torch.randn_like(randomized_target_orientation) * self.three_sigma_target_attitude_deg / 3.0 / 180.0 * math.pi
+
+            # Create quaternions for each rotation axis
+            quat_roll = quat_from_angle_axis(randomized_target_orientation[:, 0], torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1))
+            quat_pitch = quat_from_angle_axis(randomized_target_orientation[:, 1] , torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
+            quat_yaw = quat_from_angle_axis(randomized_target_orientation[:, 2], torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1))
+            
+            # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
+            target_attitudes = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
+            
+            self.target_body_q[:, 0:3] = mins + random_factors * ranges
+            self.target_body_q[:, 3:7] = target_attitudes # Set target orientations as quaternions
+            
+            # Set target velocities
+            self.target_body_qd[:, 3:6] = self.target_lin_vel.repeat(self.num_envs, 1) + torch.randn_like(self.target_lin_vel) * self.three_sigma_target_lin_vel / 3.0
+            self.target_body_qd[:, :3] = self.target_ang_vel.repeat(self.num_envs, 1) + torch.randn_like(self.target_ang_vel) * self.three_sigma_target_ang_vel / 3.0
+
     @torch.no_grad()
     def randomize_init(self, env_ids):        
         """Randomize drone spawn positions following ant pattern"""
@@ -591,22 +651,21 @@ class DroneParcour(WarpEnv):
         N = len(env_ids)
         
         ##  ================== sample initial pose ========================
+        # generate random initial drone attitudes            
+        randomized_initial_orientation = self.initial_drone_attitude_euler_deg.repeat(N, 1) / 180.0 * math.pi
+        randomized_initial_orientation += torch.randn_like(randomized_initial_orientation) * self.three_sigma_initial_attitude_deg / 3.0 / 180.0 * math.pi
 
-        # Set initial pose from euler angles (roll, pitch, yaw in radians)
-        initial_euler = torch.tensor([0.0, 0.0, 0.0], device=self.device)  # [roll, pitch, yaw]
-        randomized_initial_orientation = initial_euler.repeat(N, 1) + torch.normal(mean=0.0, std=self.three_sigma_initial_attitude_deg / 3.0 / 180.0 * math.pi, size=(N, 3), device=self.device)
-     
         # Create quaternions for each rotation axis
-        quat_roll = quat_from_angle_axis(randomized_initial_orientation[:, 0], torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(N, -1))
-        quat_pitch = quat_from_angle_axis(randomized_initial_orientation[:, 1] , torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(N, -1))
-        quat_yaw = quat_from_angle_axis(randomized_initial_orientation[:, 2], torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(N, -1))
-        
+        quat_roll = quat_from_angle_axis(randomized_initial_orientation[:, 0], torch.tensor([1.0, 0.0, 0.0], device=self.device))
+        quat_pitch = quat_from_angle_axis(randomized_initial_orientation[:, 1] , torch.tensor([0.0, 1.0, 0.0], device=self.device))
+        quat_yaw = quat_from_angle_axis(randomized_initial_orientation[:, 2], torch.tensor([0.0, 0.0, 1.0], device=self.device))
+
         # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
         initial_quat = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
         
         # Set initial quaternion for all selected environments
-        body_q[env_ids, 3:7] = initial_quat.squeeze()
-
+        body_q[env_ids, 3:7] = initial_quat
+        
         # Add random position offset
         # Generate random spawn positions within spawn bounds
         spawn_mins = self.spawn_bounds[:, 0]  # [x_min, y_min, z_min]
@@ -647,7 +706,7 @@ class DroneParcour(WarpEnv):
         ang_vel = body_qd[:, :3]
 
         # Target relative position
-        target_rel = self.targets - (body_q[:, :3] - self.env_offsets)
+        target_rel = self.target_body_q[:,:3] - (body_q[:, :3] - self.env_offsets)
 
         # reasonable physical bounds (tune if needed)
         lin_vel = torch.clamp(lin_vel, -50.0, 50.0)
@@ -687,7 +746,7 @@ class DroneParcour(WarpEnv):
         jerk = wp.to_torch(self.state_0.body_qd - self.state_1.body_qd) * self.frame_dt
 
         # target proximity (reward gets bigger as you get closer)
-        target_dist = torch.linalg.norm(self.targets - drone_pos, dim=1)        
+        target_dist = torch.linalg.norm(self.target_body_q[:,:3] - drone_pos, dim=1)  
         
         # POSITIVE proximity reward that increases as you get closer
         proximity_reward = 1.0 / (1.0 + target_dist**2)  # Range: ~0 to 10
@@ -728,7 +787,7 @@ class DroneParcour(WarpEnv):
             termination_penalty = torch.where(terminated, torch.ones_like(total_reward) * -1.0, torch.zeros_like(total_reward))
             total_reward = total_reward + termination_penalty
             
-            # reset = torch.where(terminated, torch.ones_like(reset), reset)
+            reset = torch.where(terminated, torch.ones_like(reset), reset)
             
         else:
             terminated = torch.zeros_like(reset, dtype=torch.bool)
