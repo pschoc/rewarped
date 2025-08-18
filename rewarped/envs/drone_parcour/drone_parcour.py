@@ -151,6 +151,7 @@ class DroneParcour(WarpEnv):
         device = kwargs.get("device", "cuda:0")       
         max_episode_length = kwargs.pop("max_episode_length", episode_length)
         early_termination = kwargs.pop("early_termination", early_termination)
+
         
         # Define bounds: [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
         self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds", [[-2.0, 2.0], [1.0, 3.0], [-2.0, 2.0]]), device=device)
@@ -160,6 +161,9 @@ class DroneParcour(WarpEnv):
         self.obstacle_min_size = kwargs.pop("obstacle_min_size", 0.2)
         self.obstacle_max_size = kwargs.pop("obstacle_max_size", 0.5)
         self.termination_distance = kwargs.pop("termination_distance", 0.1)
+        self.three_sigma_initial_attitude_deg = kwargs.pop("three_sigma_initial_attitude_deg", 10.0)  # 10 degrees
+        self.three_sigma_initial_lin_vel = kwargs.pop("three_sigma_initial_lin_vel", [0.5, 0.5, 0.5])  # [vx, vy, vz] in m/s
+        self.three_sigma_initial_ang_vel = kwargs.pop("three_sigma_initial_ang_vel", [0.1, 0.1, 0.1])  # [wx, wy, wz] in rad/s
         
         # Drone construction parameters
         self.density_carbon = kwargs.pop("density_carbon", 1600.0)  # kg/m³
@@ -194,10 +198,10 @@ class DroneParcour(WarpEnv):
         render_mode = kwargs.pop("render_mode", "none")
         
         # Simple observation like ant: position + velocity + target + actions = 16
-        num_obs = 16
+        num_obs = 20
         num_act = 4  # Four thrust controls
 
-        self.applied_body_force = torch.zeros((num_envs, 4), device=device, requires_grad=True)
+        self.applied_body_force = torch.zeros((num_envs, 4), device=device, requires_grad=True)        
 
         # Now call super with only the parameters it expects
         super().__init__(
@@ -586,12 +590,22 @@ class DroneParcour(WarpEnv):
 
         N = len(env_ids)
         
-        # Ensure we have at least one environment to avoid division by zero
-        if N == 0:
-            return
+        ##  ================== sample initial pose ========================
 
-        # Set identity quaternion first
-        body_q[env_ids, 3:7] = self.start_rotation.clone()
+        # Set initial pose from euler angles (roll, pitch, yaw in radians)
+        initial_euler = torch.tensor([0.0, 0.0, 0.0], device=self.device)  # [roll, pitch, yaw]
+        randomized_initial_orientation = initial_euler.repeat(N, 1) + torch.normal(mean=0.0, std=self.three_sigma_initial_attitude_deg / 3.0 / 180.0 * math.pi, size=(N, 3), device=self.device)
+     
+        # Create quaternions for each rotation axis
+        quat_roll = quat_from_angle_axis(randomized_initial_orientation[:, 0], torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(N, -1))
+        quat_pitch = quat_from_angle_axis(randomized_initial_orientation[:, 1] , torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(N, -1))
+        quat_yaw = quat_from_angle_axis(randomized_initial_orientation[:, 2], torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(N, -1))
+        
+        # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
+        initial_quat = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
+        
+        # Set initial quaternion for all selected environments
+        body_q[env_ids, 3:7] = initial_quat.squeeze()
 
         # Add random position offset
         # Generate random spawn positions within spawn bounds
@@ -600,24 +614,23 @@ class DroneParcour(WarpEnv):
         spawn_ranges = spawn_maxs - spawn_mins
         body_q[env_ids, 0:3] = spawn_mins + torch.rand(size=(N, 3), device=self.device) * spawn_ranges
 
-        # Small random orientation around random axis
-        angle = (torch.rand(N, device=self.device) - 0.5) * math.pi / 12.0  # ±15 degrees
-        axis = torch.nn.functional.normalize(torch.rand((N, 3), device=self.device) - 0.5, dim=1)
-        body_q[env_ids, 3:7] = quat_mul(body_q[env_ids, 3:7], quat_from_angle_axis(angle, axis))
+        ##  ================== sample initial velocity ========================
+        # linear random velocity
+        sigma_initial_lin_vel_tensor = torch.tensor(self.three_sigma_initial_lin_vel, device=self.device) / 3.0
+        body_qd[env_ids, 3:6] = torch.randn_like(body_qd[env_ids, 3:6]) * sigma_initial_lin_vel_tensor
 
-        # Set small random velocities
-        body_qd[env_ids, :] = 0.01 * (torch.rand(size=(N, body_qd.shape[1]), device=self.device) - 0.5)
-
-        # body_q = self.state.body_q.view(self.num_envs, -1)
-        # body_q[env_ids, 0:3] = torch.tensor([0.0, 1.0, 0.0], device=self.device)
+        # angular random velocity
+        sigma_initial_ang_vel_tensor = torch.tensor(self.three_sigma_initial_ang_vel, device=self.device) / 3.0
+        body_qd[env_ids, :3] = torch.randn_like(body_qd[env_ids, :3]) * sigma_initial_ang_vel_tensor
+        
         self.reset_targets()
 
     def pre_physics_step(self, actions):        
         # Clamp actions to [-1, 1] range
-        # actions = torch.clamp(actions, -1.0, 1.0)        
+        actions = torch.clamp(actions, -1.0, 1.0)        
         body_force = (actions + 1.0) * 0.5    
         self.applied_body_force = body_force
-        # body_force = torch.tensor([0.76, 0.76, 0.75, 0.75], device=self.device, requires_grad=True)
+        # body_force = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device, requires_grad=True)
         self.control.assign("body_force", body_force)        
 
     def compute_observations(self):
@@ -630,7 +643,7 @@ class DroneParcour(WarpEnv):
         drone_rot = body_q[:, 3:7]
 
         # Velocities
-        lin_vel = body_qd[:, 3:6] if body_qd.shape[1] > 6 else body_qd[:, :3]
+        lin_vel = body_qd[:, 3:6]
         ang_vel = body_qd[:, :3]
 
         # Target relative position
@@ -645,7 +658,8 @@ class DroneParcour(WarpEnv):
             drone_rot,  # 3:7   - full quaternion orientation
             lin_vel,  # 7:10  - linear velocity
             ang_vel,  # 10:13 - angular velocity
-            target_rel,  # 13:16 - target relative position            
+            target_rel,  # 13:16 - target relative position
+            self.applied_body_force.detach(),  # 16:20 - applied forces (actions)            
         ]
         self.obs_buf = torch.cat(obs_buf, dim=-1)
         
@@ -658,37 +672,50 @@ class DroneParcour(WarpEnv):
     def compute_reward(self):                
         reset_buf = self.reset_buf
         progress_buf = self.progress_buf
+        
+        body_q = self.state.body_q.clone()
+        body_qd = self.state.body_qd.clone()
 
-        # indices in obs
-        drone_pos = self.state.body_q[:, 0:3]        
-        ang_vel = self.state.body_qd[:, 3:6]
+        # Extract drone position and velocity (first 6 DOF)
+        drone_pos = body_q[:, :3] - self.env_offsets  # Remove environment offset
+        # drone_rot = body_q[:, 3:7]
+
+        # Velocities
+        # lin_vel = body_qd[:, 3:6]
+        ang_vel = body_qd[:, :3]
+
+        jerk = wp.to_torch(self.state_0.body_qd - self.state_1.body_qd) * self.frame_dt
 
         # target proximity (reward gets bigger as you get closer)
         target_dist = torch.linalg.norm(self.targets - drone_pos, dim=1)        
         
         # POSITIVE proximity reward that increases as you get closer
-        proximity_reward = 100.0 / (1.0 + target_dist)  # Range: ~0 to 10
+        proximity_reward = 1.0 / (1.0 + target_dist**2)  # Range: ~0 to 10
         
         # Alive bonus (scaled appropriately)
         alive_reward = 0.01 * progress_buf  # Range: 0 to ~100
         
         # Reached target bonus
         target_reached = target_dist < self.termination_distance
-        target_bonus = torch.where(target_reached, torch.ones_like(target_dist) * 50.0, torch.zeros_like(target_dist))
-        
-        # Action penalty (keep actions smooth)
-        control_effort = torch.sum(self.applied_body_force**2, dim=-1)
-        action_penalty = -0.1 * control_effort
-        
-        total_reward = proximity_reward + alive_reward + target_bonus + action_penalty
-        
+        target_bonus = torch.where(target_reached, torch.ones_like(target_dist) * 100.0, torch.zeros_like(target_dist))
+
+        # # turn rates penalty
+        # turn_rate = torch.linalg.norm(ang_vel[:,1], dim=1)        
+
+        # # jerk penalty
+        # linear_jerk = torch.linalg.norm(jerk[:,3:6], dim=1)
+        # angular_jerk = torch.linalg.norm(jerk[:,:3], dim=1)
+        # jerk_penalty = -0.1 * linear_jerk + -1.0 * angular_jerk
+
+        total_reward = proximity_reward + alive_reward + target_bonus - 0.1*torch.var(self.applied_body_force, dim=1)
+
         # episode truncation
         truncated = progress_buf > self.episode_length - 1
         reset = torch.where(truncated, torch.ones_like(reset_buf), reset_buf)
 
         if self.early_termination:
             ang_speed = torch.linalg.norm(ang_vel, dim=1)
-            too_fast = ang_speed > 200.0
+            too_fast = ang_speed > 50.0
             
             # Check if drone is outside arena bounds
             arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
@@ -697,11 +724,12 @@ class DroneParcour(WarpEnv):
             
             terminated = too_fast | outside_arena
             
-            # # Apply penalty for those who get force-reset
-            termination_penalty = torch.where(terminated, torch.ones_like(total_reward) * -100.0, torch.zeros_like(total_reward))
+            # Apply penalty for those who get force-reset
+            termination_penalty = torch.where(terminated, torch.ones_like(total_reward) * -1.0, torch.zeros_like(total_reward))
             total_reward = total_reward + termination_penalty
             
-            reset = torch.where(terminated, torch.ones_like(reset), reset)
+            # reset = torch.where(terminated, torch.ones_like(reset), reset)
+            
         else:
             terminated = torch.zeros_like(reset, dtype=torch.bool)
             

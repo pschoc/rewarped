@@ -2,6 +2,7 @@
 data/
 outputs/
 rewarped/data/
+workdir/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
