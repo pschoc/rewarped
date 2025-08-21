@@ -11,6 +11,7 @@ from rewarped.environment import IntegratorType
 from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate
 from warp.sim.collide import box_sdf, capsule_sdf, cone_sdf, cylinder_sdf, mesh_sdf, plane_sdf, sphere_sdf
 
+
 class Propeller:
     """Physics-based propeller model using thrust and drag coefficients"""
     def __init__(self):
@@ -139,8 +140,7 @@ def apply_drone_forces_kernel(
     )
 
 class DroneParcour(WarpEnv):
-    sim_name = "DroneParcour"
-    env_offset = (5.0, 0.0, 5.0)
+    sim_name = "DroneParcour"    
 
     state_tensors_names = ("body_q", "body_qd")    
     control_tensors_names = ("body_force",)
@@ -151,16 +151,18 @@ class DroneParcour(WarpEnv):
         device = kwargs.get("device", "cuda:0")       
         max_episode_length = kwargs.pop("max_episode_length", episode_length)
         early_termination = kwargs.pop("early_termination", early_termination)
-
+        self.render_fps = kwargs.pop("render_fps", 10)  # Frames per second for rendering
         
         # Define bounds: [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
         self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds", [[-2.0, 2.0], [1.0, 3.0], [-2.0, 2.0]]), device=device)
         self.arena_bounds = torch.tensor(kwargs.pop("arena_bounds", [[-8.0, 8.0], [0.0, 6.0], [-8.0, 8.0]]), device=device)
         self.target_bounds = torch.tensor(kwargs.pop("target_bounds", [[-6.0, 6.0], [1.0, 5.0], [-6.0, 6.0]]), device=device)
-        self.num_obstacles = kwargs.pop("num_obstacles", 5)
+        self.num_obstacles_max = kwargs.pop("num_obstacles_max", 5)
         self.obstacle_min_size = kwargs.pop("obstacle_min_size", 0.2)
         self.obstacle_max_size = kwargs.pop("obstacle_max_size", 0.5)
-        self.termination_distance = kwargs.pop("termination_distance", 0.1)
+        self.termination_distance = kwargs.pop("termination_distance", 0.2)
+
+        self.is_render_targets = kwargs.pop("is_render_targets", False)  # Whether to render target coordinate frames
 
         # spawning parameters
         self.initial_drone_attitude_euler_deg = torch.tensor(kwargs.pop("initial_drone_attitude_euler_deg", [0.0, 0.0, 0.0]), device=device)  # [roll, pitch, yaw] in degrees
@@ -213,11 +215,11 @@ class DroneParcour(WarpEnv):
         render_mode = kwargs.pop("render_mode", "none")
         
         # Simple observation like ant: position + velocity + target + actions = 16
-        num_obs = 20
+        num_obs = 30
         num_act = 4  # Four thrust controls
-
+  
         self.applied_body_force = torch.zeros((num_envs, 4), device=device, requires_grad=True)        
-
+        self.ground_plane = kwargs.pop("ground_plane", True)  # Whether to activate ground plane collision
         # Now call super with only the parameters it expects
         super().__init__(
             num_envs=num_envs,
@@ -235,12 +237,46 @@ class DroneParcour(WarpEnv):
         """Create the model builder with drone-specific settings"""
         builder = super().create_modelbuilder()
         builder.rigid_contact_margin = 0.02
+        
         return builder
 
+    def add_shared_obstacles(self, builder):
+        # ================ add obstacles
+        random_factors_position = torch.rand((self.num_obstacles_max, 3))
+        random_factors_shapes = torch.rand((self.num_obstacles_max, 3))
+        random_orientations = torch.rand((self.num_obstacles_max, 3)) * 2.0 * math.pi
+
+        obstacle_positions = random_factors_position * (self.arena_bounds[:, 1] - self.arena_bounds[:, 0]).cpu() + self.arena_bounds[:, 0].cpu()
+        obstacle_shapes = random_factors_shapes * (self.obstacle_max_size - self.obstacle_min_size) + self.obstacle_min_size
+
+        quat_roll = quat_from_angle_axis(random_orientations[:,0], torch.tensor([1.0, 0.0, 0.0]).expand(self.num_obstacles_max, -1))
+        quat_pitch = quat_from_angle_axis(random_orientations[:, 1] , torch.tensor([0.0, 1.0, 0.0]).expand(self.num_obstacles_max, -1))
+        quat_yaw = quat_from_angle_axis(random_orientations[:, 2], torch.tensor([0.0, 0.0, 1.0]).expand(self.num_obstacles_max, -1))
+
+        # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
+        target_attitudes = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
+
+        self.obstacle_indices = torch.zeros((self.num_obstacles_max,), dtype=torch.int32)
+        for i in range(self.num_obstacles_max):
+            obstacle_idx = builder.add_body()                            
+
+            builder.add_shape_box(
+                obstacle_idx,
+                hx = obstacle_shapes[i, 0],
+                hy = obstacle_shapes[i, 1],
+                hz = obstacle_shapes[i, 2],                
+                is_solid=True,
+                has_shape_collision=True,
+                has_ground_collision=True,
+                is_visible=True,
+            )
+
+            self.obstacle_indices[i] = obstacle_idx
+        
     def create_model(self):
         """Create model and ensure control() allocates a differentiable user_act tensor."""
         model = super().create_model()
-
+            
         num_envs = self.num_envs
         requires_grad = self.requires_grad
         device = model.device
@@ -374,10 +410,7 @@ class DroneParcour(WarpEnv):
         # Store prop data for force calculations
         self.props = props
         self.turning_directions = turning_directions
-        self.prop_positions = prop_positions_b
-
-        # Initial position: higher up for drone flight
-        builder.body_q[0] = [1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # Start at 2m height
+        self.prop_positions = prop_positions_b        
 
     def init_sim(self):
         super().init_sim()
@@ -543,15 +576,16 @@ class DroneParcour(WarpEnv):
 
     def render(self, state=None):
         """Override render to show dynamic target spheres"""
-        if self.renderer is not None:
-            self.render_time += self.frame_dt
+        self.render_time += self.frame_dt
+        if self.render_time % (1.0 / self.render_fps) < self.frame_dt and self.renderer is not None:
+
             self.renderer.begin_frame(self.render_time)
             
             # Add custom target visualization if targets exist
-            if hasattr(self, 'target_body_q'):
+            if hasattr(self, 'target_body_q') and self.is_render_targets:
                 # Draw target coordinate frames for each environment
                 for i in range(self.num_envs):
-                    target_pos = self.target_body_q[i, :3].cpu().numpy() + self.env_offsets[i].cpu().numpy()
+                    target_pos = self.target_body_q[i, :3].cpu().numpy()
                     target_quat = self.target_body_q[i, 3:7].cpu().numpy()  # [x, y, z, w]
                               
                     # Arrow dimensions
@@ -561,7 +595,7 @@ class DroneParcour(WarpEnv):
                     cap_height = 0.1
                     
                     try:
-                        # X-axis arrow (red)
+                        # stateX-axis arrow (red)
                         self.renderer.render_arrow(
                             name=f"target_x_{i}",
                             pos=tuple(target_pos),
@@ -609,9 +643,6 @@ class DroneParcour(WarpEnv):
             # Render the simulation state
             self.renderer.render(state or self.state_0)
             self.renderer.end_frame()
-        else:
-            # Fall back to parent render if no renderer
-            super().render(state)
 
     def reset_targets(self):
         """Reset target positions to random locations within target bounds"""
@@ -645,8 +676,8 @@ class DroneParcour(WarpEnv):
     def randomize_init(self, env_ids):        
         """Randomize drone spawn positions following ant pattern"""
         # For rigid body drone, use body_q instead of joint_q
-        body_q = self.state.body_q.view(self.num_envs, -1)
-        body_qd = self.state.body_qd.view(self.num_envs, -1)
+        body_q = self.state.body_q[int(self.obstacle_indices[-1]+1):, :]
+        body_qd = self.state.body_qd[int(self.obstacle_indices[-1]+1):, :]
 
         N = len(env_ids)
         
@@ -688,108 +719,142 @@ class DroneParcour(WarpEnv):
         # Clamp actions to [-1, 1] range
         actions = torch.clamp(actions, -1.0, 1.0)        
         body_force = (actions + 1.0) * 0.5    
-        self.applied_body_force = body_force
+        self.applied_body_force = body_force.detach()       
         # body_force = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device, requires_grad=True)
         self.control.assign("body_force", body_force)        
-
+    
     def compute_observations(self):
-        """Extract observations following ant pattern"""
+        """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
         body_q = self.state.body_q.clone()
         body_qd = self.state.body_qd.clone()
 
-        # Extract drone position and velocity (first 6 DOF)
-        drone_pos = body_q[:, :3] - self.env_offsets  # Remove environment offset
-        drone_rot = body_q[:, 3:7]
+        # position and orientation
+        pos = body_q[:, 0:3]
+        quat = body_q[:, 3:7]
 
-        # Velocities
+        # up-axis in world (rotate local Y by body orientation)
+        up_local = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1)
+        up_axis = quat_rotate(quat, up_local)
+
+        # linear velocity and body rates
         lin_vel = body_qd[:, 3:6]
-        ang_vel = body_qd[:, :3]
+        ang_vel = body_qd[:, 0:3]
+        # target direction in body frame and distance
+        vec_to_target_world = self.target_body_q[:, :3] - pos
+        # vec_to_target_body = quat_rotate(quat_conjugate(quat), vec_to_target_world)
+        # dir_to_target_body = normalize(vec_to_target_body)
+        dir_to_target_world = vec_to_target_world / torch.norm(vec_to_target_world, dim=1, keepdim=True)
+        dist_to_target = torch.norm(vec_to_target_world, dim=1, keepdim=True)
 
-        # Target relative position
-        target_rel = self.target_body_q[:,:3] - (body_q[:, :3] - self.env_offsets)
+        # last actions
+        last_actions = self.applied_body_force # shape (N, 4)
 
-        # reasonable physical bounds (tune if needed)
-        lin_vel = torch.clamp(lin_vel, -50.0, 50.0)
-        ang_vel = torch.clamp(ang_vel, -100.0, 100.0)        
-
-        obs_buf = [
-            drone_pos,  # 0:3   - position
-            drone_rot,  # 3:7   - full quaternion orientation
-            lin_vel,  # 7:10  - linear velocity
-            ang_vel,  # 10:13 - angular velocity
-            target_rel,  # 13:16 - target relative position
-            self.applied_body_force.detach(),  # 16:20 - applied forces (actions)            
+        # obs_parts = [
+        #     pos,                # 3
+        #     up_axis,            # 3 (world up)
+        #     lin_vel,            # 3
+        #     ang_vel,            # 3
+        #     dir_to_target_world, # 3 (in world frame)
+        #     dist_to_target,     # 1
+        #     last_actions,       # 4
+        # ]
+        obs_parts = [
+            body_q,
+            body_qd,
+            self.target_body_q,
+            self.target_body_qd,
+            last_actions
         ]
-        self.obs_buf = torch.cat(obs_buf, dim=-1)
-        
-        # Replace any NaN values with random noise
-        nan_mask = torch.isnan(self.obs_buf)
-        if nan_mask.any():
-            random_noise = torch.randn_like(self.obs_buf) * 0.01
-            self.obs_buf = torch.where(nan_mask, random_noise, self.obs_buf)
+        obs = torch.cat(obs_parts, dim=-1)
+
+        # Pad to configured num_obs if needed
+        if hasattr(self, "num_obs") and obs.shape[-1] < self.num_obs:
+            pad = torch.zeros((self.num_envs, self.num_obs - obs.shape[-1]), device=self.device, dtype=obs.dtype)
+            obs = torch.cat([obs, pad], dim=-1)
+
+        self.obs_buf = obs
             
-    def compute_reward(self):                
-        reset_buf = self.reset_buf
-        progress_buf = self.progress_buf
-        
+    def compute_reward(self):
+        # Basic state
         body_q = self.state.body_q.clone()
         body_qd = self.state.body_qd.clone()
 
-        # Extract drone position and velocity (first 6 DOF)
-        drone_pos = body_q[:, :3] - self.env_offsets  # Remove environment offset
-        # drone_rot = body_q[:, 3:7]
+        pos = body_q[:,0:3]
 
-        # Velocities
-        # lin_vel = body_qd[:, 3:6]
-        ang_vel = body_qd[:, :3]
+        # target state mismatch      
+        pos_err_norm = torch.sum((self.target_body_q[:, 0:3] - body_q[:, 0:3])**2, dim=1)
+        vel_err_norm = torch.norm(self.target_body_qd[:, 3:6] - body_qd[:, 3:6], dim=1)
+        ang_vel_err = torch.norm(self.target_body_qd[:, :3] - body_qd[:, :3], dim=1)
 
-        jerk = wp.to_torch(self.state_0.body_qd - self.state_1.body_qd) * self.frame_dt
+        # Orientation error: q_err rotates current -> target
+        q_err = quat_mul(body_q[:, 3:7], quat_conjugate(self.target_body_q[:, 3:7]))
+        q_err_norm = torch.norm(q_err, dim=-1, keepdim=True)
+        q_err = q_err / (q_err_norm + 1e-9)
+        q_err = torch.where(q_err[:, 3:4] < 0.0, -q_err, q_err) # Enforce shortest rotation
 
-        # target proximity (reward gets bigger as you get closer)
-        target_dist = torch.linalg.norm(self.target_body_q[:,:3] - drone_pos, dim=1)  
+        v = q_err[:, :3]
+        w = q_err[:, 3:4]
+        v_norm = torch.norm(v, dim=1, keepdim=True)
+        ori_err_angle = 2.0 * torch.atan2(v_norm, torch.clamp(w, min=1e-9))  # (N,1)
+        ori_err_axis = v / (v_norm + 1e-9)
+        ori_err_vec = ori_err_axis * ori_err_angle                            # (N,3)
+
+        # target proximity reward
+        target_proximity_reward = 10.0 / (1.0 + pos_err_norm) 
+
+        orientation_penalty = -1.0* torch.norm(ori_err_vec, dim=-1)
+        target_rate_mismatch_penalty = -1.0*vel_err_norm - 1.0*ang_vel_err
+
+        action_penalty = -0.01 * torch.sum(self.applied_body_force**2, dim=-1)
+
+        # ===================== Arena Boundary Barriers =========================
+        arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
+        arena_maxs = self.arena_bounds[:, 1]  # [x_max, y_max, z_max]
+        start_penalizing_before_arenabounds = 1.0  # meters before hitting the boundary
+        beta_softplus_arenabounds = 2 # the higher the sharper the corner
+
+        # how much outside of the arena is the drone?
+        dist_to_min = arena_mins - pos
+        dist_to_max = pos - arena_maxs
+
+        how_much_outside, _ = torch.max(torch.cat((dist_to_min, dist_to_max), dim=1), dim=1)
+        outside_penalty = -torch.nn.functional.softplus(how_much_outside + start_penalizing_before_arenabounds, beta=beta_softplus_arenabounds)
+
+        # ====================== Angular Speed Barrier =========================
+        ang_speed = torch.linalg.norm(body_qd[:, :3], dim=1)
+        max_ang_speed = 100.0  # rad/s
+        start_penalizing_before_ratelimit = 10.0
+        beta_softplus_ang_speed = 0.5  # the higher the sharper the corner
+        how_much_spinning_too_fast = ang_speed - max_ang_speed
+        ratelimit_penalty = -torch.nn.functional.softplus(how_much_spinning_too_fast + start_penalizing_before_ratelimit, beta=beta_softplus_ang_speed)
+
+        progress_reward = 0.001 * self.progress_buf
         
-        # POSITIVE proximity reward that increases as you get closer
-        proximity_reward = 1.0 / (1.0 + target_dist**2)  # Range: ~0 to 10
-        
-        # Alive bonus (scaled appropriately)
-        alive_reward = 0.01 * progress_buf  # Range: 0 to ~100
-        
-        # Reached target bonus
-        target_reached = target_dist < self.termination_distance
-        target_bonus = torch.where(target_reached, torch.ones_like(target_dist) * 100.0, torch.zeros_like(target_dist))
+        reward = (
+            target_proximity_reward  # goal directedness
+            # + progress_reward        # progress reward  
+            # + action_penalty         # action cost
+            + outside_penalty  # arena boundary barriers (differentiable)
+            + ratelimit_penalty  # angular speed barrier (differentiable)
+            # + orientation_penalty * target_proximity_reward # penalize orientation error at goal
+            # + target_rate_mismatch_penalty * target_proximity_reward # penalize target rate mismatch at goal
+        )
 
-        # # turn rates penalty
-        # turn_rate = torch.linalg.norm(ang_vel[:,1], dim=1)        
+        # Truncation/termination (ant-like structure, but with sensible failsafes)
+        reset_buf, progress_buf = self.reset_buf, self.progress_buf
+        max_episode_steps, early_termination = self.episode_length, self.early_termination
 
-        # # jerk penalty
-        # linear_jerk = torch.linalg.norm(jerk[:,3:6], dim=1)
-        # angular_jerk = torch.linalg.norm(jerk[:,:3], dim=1)
-        # jerk_penalty = -0.1 * linear_jerk + -1.0 * angular_jerk
-
-        total_reward = proximity_reward + alive_reward + target_bonus - 0.1*torch.var(self.applied_body_force, dim=1)
-
-        # episode truncation
-        truncated = progress_buf > self.episode_length - 1
+        truncated = progress_buf > max_episode_steps - 1
         reset = torch.where(truncated, torch.ones_like(reset_buf), reset_buf)
 
-        if self.early_termination:
-            ang_speed = torch.linalg.norm(ang_vel, dim=1)
-            too_fast = ang_speed > 50.0
-            
-            # Check if drone is outside arena bounds
-            arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
-            arena_maxs = self.arena_bounds[:, 1]  # [x_max, y_max, z_max]
-            outside_arena = torch.any((drone_pos < arena_mins) | (drone_pos > arena_maxs), dim=1)
-            
-            terminated = too_fast | outside_arena
-            
-            # Apply penalty for those who get force-reset
-            termination_penalty = torch.where(terminated, torch.ones_like(total_reward) * -1.0, torch.zeros_like(total_reward))
-            total_reward = total_reward + termination_penalty
-            
+        if early_termination:
+            # Hard termination only for extreme violations -> if way beyond barrier functions            
+            is_too_fast = how_much_spinning_too_fast > start_penalizing_before_ratelimit*3
+            is_way_outside = how_much_outside > start_penalizing_before_arenabounds*3
+
+            terminated = is_too_fast | is_way_outside
             reset = torch.where(terminated, torch.ones_like(reset), reset)
-            
         else:
-            terminated = torch.zeros_like(reset, dtype=torch.bool)
-            
-        self.rew_buf, self.reset_buf, self.terminated_buf, self.truncated_buf = total_reward, reset, terminated, truncated
+            terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
+
+        self.rew_buf, self.reset_buf, self.terminated_buf, self.truncated_buf = reward, reset, terminated, truncated

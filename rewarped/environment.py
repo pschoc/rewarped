@@ -267,9 +267,17 @@ class Environment:
             setattr(builder, k, v)
 
         return builder
+        
+    def add_shared_obstacles(self, builder):
+        """Template method for adding shared obstacles. Override in subclasses."""
+        pass
 
     def create_builder(self):
         builder = self.create_modelbuilder()
+        
+        # Add shared obstacles before creating environments
+        self.add_shared_obstacles(builder)
+
         env_builder = self.create_modelbuilder()
         self.create_env(env_builder)
         self.env_offsets = compute_env_offsets(self.num_envs, self.env_offset, self.env_offset_correction, self.up_axis)
