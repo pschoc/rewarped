@@ -559,7 +559,7 @@ class WarpEnv(Environment):
                 def copy_prev(x, prev_x, name, inplace=True):
                     attr, prev_attr = getattr(x, name), getattr(prev_x, name)
                     shape = attr.shape
-                    attr, prev_attr = attr.view(self.num_envs, -1), prev_attr.view(self.num_envs, -1)
+                    # attr, prev_attr = attr.view(self.num_envs, -1), prev_attr.view(self.num_envs, -1)
                     if inplace:
                         attr.detach().index_copy_(0, prev_env_ids, prev_attr[prev_env_ids])
                     else:

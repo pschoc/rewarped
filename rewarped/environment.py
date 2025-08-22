@@ -268,7 +268,7 @@ class Environment:
 
         return builder
         
-    def add_shared_obstacles(self, builder):
+    def add_static_shared_obstacles(self, builder):
         """Template method for adding shared obstacles. Override in subclasses."""
         pass
 
@@ -276,7 +276,7 @@ class Environment:
         builder = self.create_modelbuilder()
         
         # Add shared obstacles before creating environments
-        self.add_shared_obstacles(builder)
+        self.add_static_shared_obstacles(builder)
 
         env_builder = self.create_modelbuilder()
         self.create_env(env_builder)

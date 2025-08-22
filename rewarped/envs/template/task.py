@@ -51,7 +51,7 @@ class Task(WarpEnv):
         # self.print_model_info()
 
         with torch.no_grad():
-            self.joint_act = wp.to_torch(self.model.joint_act).view(self.num_envs, -1).clone()
+            self.joint_act = wp.to_torch(self.model.joint_act).clone()
             self.joint_act_indices = ...
 
     def reset_idx(self, env_ids):
@@ -62,7 +62,7 @@ class Task(WarpEnv):
         pass
 
     def pre_physics_step(self, actions):
-        actions = actions.view(self.num_envs, -1)
+        # actions = actions.view(self.num_envs, -1)
         actions = torch.clip(actions, -1.0, 1.0)
         self.actions = actions
         acts = self.action_scale * actions

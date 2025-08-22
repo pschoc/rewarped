@@ -1,4 +1,4 @@
-# pyright: reportGeneralTypeIssues=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false
+# pyright: reportGeneralTypeIssues=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportInvalidTypeForm=false, reportOperatorIssue=false, reportArgumentType=false, reportCallIssue=false
 import os
 import math
 import torch
@@ -10,6 +10,195 @@ from rewarped.warp.model_monkeypatch import Model_control
 from rewarped.environment import IntegratorType
 from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate
 from warp.sim.collide import box_sdf, capsule_sdf, cone_sdf, cylinder_sdf, mesh_sdf, plane_sdf, sphere_sdf
+
+
+# -------------------- Depth camera kernels (SDF-based ray marching) --------------------
+@wp.func
+def _scene_sdf(
+    env_id: int,
+    x_world: wp.vec3,
+    obstacle_ids: wp.array(dtype=int, ndim=2),
+    num_obs_per_env: int,
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,
+) -> float:
+    # minimum signed distance to any obstacle (>=0 outside)
+    dmin = 1.0e9
+    for j in range(num_obs_per_env):
+        s_idx = obstacle_ids[env_id, j]
+        if s_idx < 0:
+            continue
+        X_bs = shape_X_bs[s_idx]
+        x_local = wp.transform_point(wp.transform_inverse(X_bs), x_world)
+
+        geo_type = geo.type[s_idx]
+        geo_scale = geo.scale[s_idx]
+
+        d = 1.0e9
+        if geo_type == wp.sim.GEO_SPHERE:
+            d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
+        elif geo_type == wp.sim.GEO_BOX:
+            d = box_sdf(geo_scale, x_local)
+        elif geo_type == wp.sim.GEO_CAPSULE:
+            d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
+        elif geo_type == wp.sim.GEO_CYLINDER:
+            d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
+        elif geo_type == wp.sim.GEO_CONE:
+            d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
+        elif geo_type == wp.sim.GEO_MESH:
+            mesh = geo.source[s_idx]
+            min_scale = wp.min(geo_scale)
+            max_dist = 1.0e3
+            d = mesh_sdf(mesh, wp.cw_div(x_local, geo_scale), max_dist)
+            d *= min_scale
+        elif geo_type == wp.sim.GEO_SDF:
+            volume = geo.source[s_idx]
+            xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
+            nn = wp.vec3(0.0, 0.0, 0.0)
+            d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, nn)
+        elif geo_type == wp.sim.GEO_PLANE:
+            d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
+
+        if d < dmin:
+            dmin = d
+    if dmin > 1.0e8:
+        dmin = 1.0e8
+    return dmin
+
+
+@wp.kernel
+def depth_sphere_trace_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    drone_body_index: wp.array(dtype=int),
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,
+    obstacle_ids: wp.array(dtype=int, ndim=2),
+    num_obs_per_env: int,
+    width: int,
+    height: int,
+    fov_y: float,
+    near: float,
+    far: float,
+    cam_offset_b: wp.vec3,
+    cam_forward_b: wp.vec3,
+    cam_up_b: wp.vec3,
+    depth_out: wp.array(dtype=float, ndim=2),  # [num_envs, width*height]
+):
+    env_id, pix = wp.tid()
+
+    body_idx = drone_body_index[env_id]
+    tf = body_q[body_idx]
+
+    # camera basis in world
+    f_b = wp.normalize(cam_forward_b)
+    u_b = wp.normalize(cam_up_b)
+    r_b = wp.normalize(wp.cross(f_b, u_b))
+
+    f_w = wp.normalize(wp.transform_vector(tf, f_b))
+    u_w = wp.normalize(wp.transform_vector(tf, u_b))
+    r_w = wp.normalize(wp.transform_vector(tf, r_b))
+
+    origin = wp.transform_point(tf, cam_offset_b)
+
+    x = pix % width
+    y = pix // width
+    aspect = float(width) / float(height)
+
+    sx = 2.0 * float(x) / float(width - 1) - 1.0
+    sy = 2.0 * float(y) / float(height - 1) - 1.0
+
+    half_tan = wp.tan(0.5 * fov_y)
+    dir = wp.normalize(f_w + half_tan * (sx * aspect * r_w + sy * u_w))
+
+    # sphere tracing
+    t = near
+    max_steps = 64
+    eps = 1.0e-3
+
+    for k in range(max_steps):
+        if t > far:
+            break
+        p = origin + dir * t
+        d = _scene_sdf(env_id, p, obstacle_ids, num_obs_per_env, shape_X_bs, geo)
+        if d < eps:
+            break
+        # safety clamp to avoid zero step
+        if d < 1.0e-4:
+            d = 1.0e-4
+        t = t + d
+
+    if t > far:
+        t = far
+
+    depth_out[env_id, pix] = t
+
+
+class SimulationView:
+    """View class to access drone and obstacle bodies from the full simulation state"""
+    
+    def __init__(self, model, num_envs, num_obstacles):
+        self.model = model
+        self.device = model.device
+        self.num_envs = num_envs
+        self.num_obstacles = num_obstacles # currently all only shapes
+        
+        # Body indices: obstacles come first, then drones
+        self.obstacle_indices = list(range(num_obstacles))
+        self.drone_indices = list(range(num_obstacles, num_obstacles + num_envs))
+        
+        # Create warp arrays for efficient GPU access
+        self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if num_obstacles > 0 else None
+        self._drone_indices_wp = wp.array(self.drone_indices, dtype=int, device=self.device)
+    
+    def get_drone_positions(self, state):
+        """Get drone positions from full state"""
+        return state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, :3]
+    
+    def get_drone_orientations(self, state):
+        """Get drone orientations from full state"""
+        return state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, 3:7]
+    
+    def get_drone_velocities(self, state):
+        """Get drone linear velocities from full state"""
+        return state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, 3:6]
+    
+    def get_drone_angular_velocities(self, state):
+        """Get drone angular velocities from full state"""
+        return state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, :3]
+    
+    def get_drone_states(self, state):
+        """Get full drone body_q and body_qd"""
+        body_q = state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs]
+        body_qd = state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs]
+        return body_q, body_qd
+    
+    def set_drone_positions(self, state, positions):
+        """Set drone positions in full state"""
+        state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, :3] = positions
+    
+    def set_drone_orientations(self, state, orientations):
+        """Set drone orientations in full state"""
+        state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, 3:7] = orientations
+    
+    def set_drone_velocities(self, state, velocities):
+        """Set drone linear velocities in full state"""
+        state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, 3:6] = velocities
+    
+    def set_drone_angular_velocities(self, state, angular_velocities):
+        """Set drone angular velocities in full state"""
+        state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, :3] = angular_velocities
+    
+    def get_obstacle_positions(self, state):
+        """Get obstacle positions from full state"""
+        if self.num_obstacles == 0:
+            return None
+        return state.body_q[:self.num_obstacles, :3]
+    
+    def get_obstacle_orientations(self, state):
+        """Get obstacle orientations from full state"""
+        if self.num_obstacles == 0:
+            return None
+        return state.body_q[:self.num_obstacles, 3:7]
 
 
 class Propeller:
@@ -51,7 +240,6 @@ def define_propeller(
     
     # For typical quadcopter propellers, use reasonable CT and CP values
     # CT ≈ 0.1-0.15, CP ≈ 0.05-0.08 for efficient props
-    # Pitch affects thrust efficiency: higher pitch = higher thrust per RPM
     C_T = 0.15  # thrust coefficient
     C_P = 0.05  # power coefficient
 
@@ -70,6 +258,64 @@ def define_propeller(
     prop.turning_direction = turning_direction    
     
     return prop
+
+
+@wp.kernel
+def collision_cost(
+    body_q: wp.array(dtype=wp.transform),
+    obstacle_ids: wp.array(dtype=int, ndim=2),
+    drone_body_index: wp.array(dtype=int),
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,
+    margin: float,    
+    cost: wp.array(dtype=wp.float32),
+):
+    env_id, obs_id = wp.tid()
+    shape_index = obstacle_ids[env_id, obs_id]
+
+    drone_idx = drone_body_index[env_id]
+    px = wp.transform_get_translation(body_q[drone_idx])
+
+    X_bs = shape_X_bs[shape_index]
+
+    # transform particle position to shape local space
+    x_local = wp.transform_point(wp.transform_inverse(X_bs), px)
+
+    # geo description
+    geo_type = geo.type[shape_index]
+    geo_scale = geo.scale[shape_index]
+
+    # evaluate shape sdf
+    d = 1e6
+
+    if geo_type == wp.sim.GEO_SPHERE:
+        d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
+    elif geo_type == wp.sim.GEO_BOX:
+        d = box_sdf(geo_scale, x_local)
+    elif geo_type == wp.sim.GEO_CAPSULE:
+        d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
+    elif geo_type == wp.sim.GEO_CYLINDER:
+        d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
+    elif geo_type == wp.sim.GEO_CONE:
+        d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
+    elif geo_type == wp.sim.GEO_MESH:
+        mesh = geo.source[shape_index]
+        min_scale = wp.min(geo_scale)
+        max_dist = margin / min_scale
+        d = mesh_sdf(mesh, wp.cw_div(x_local, geo_scale), max_dist)
+        d *= min_scale  # TODO fix this, mesh scaling needs to be handled properly
+    elif geo_type == wp.sim.GEO_SDF:
+        volume = geo.source[shape_index]
+        xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
+        nn = wp.vec3(0.0, 0.0, 0.0)
+        d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, nn)
+    elif geo_type == wp.sim.GEO_PLANE:
+        d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
+
+    d = wp.max(d, 0.0)
+    if d < margin:
+        c = margin - d
+        wp.atomic_add(cost, env_id, c)
 
 @wp.kernel
 def apply_drone_forces_kernel(
@@ -148,11 +394,25 @@ class DroneParcour(WarpEnv):
     def __init__(self, num_envs=16, episode_length=1000, early_termination=True, **kwargs):
         
         # Extract environment parameters before calling super().__init__()
-        device = kwargs.get("device", "cuda:0")       
+        device = kwargs.get("device", "cuda:0")
+        # Depth camera config (can be overridden via kwargs)
+        self.depthcam_width = int(kwargs.pop("depthcam_width", 32))
+        self.depthcam_height = int(kwargs.pop("depthcam_height", 24))
+        self.depthcam_fov_y_deg = float(kwargs.pop("depthcam_fov_y_deg", 90.0))
+        self.depthcam_near = float(kwargs.pop("depthcam_near", 0.05))
+        self.depthcam_far = float(kwargs.pop("depthcam_far", 20.0))
+        self.include_depth_in_obs = bool(kwargs.pop("include_depth_in_obs", False))
+        # camera position/orientation relative to drone body (front-mounted)
+        self.depthcam_offset_b = torch.tensor(kwargs.pop("depthcam_offset_b", [0.15, 0.0, 0.0]), device=device, dtype=torch.float32)
+        self.depthcam_forward_b = torch.tensor(kwargs.pop("depthcam_forward_b", [1.0, 0.0, 0.0]), device=device, dtype=torch.float32)
+        self.depthcam_up_b = torch.tensor(kwargs.pop("depthcam_up_b", [0.0, 1.0, 0.0]), device=device, dtype=torch.float32)
+
         max_episode_length = kwargs.pop("max_episode_length", episode_length)
         early_termination = kwargs.pop("early_termination", early_termination)
         self.render_fps = kwargs.pop("render_fps", 10)  # Frames per second for rendering
-        
+        self.integrator_type = IntegratorType(kwargs.pop("integrator", IntegratorType.XPBD))  # Default to XPBD integrator
+        self.separate_collision_group_per_env = kwargs.pop("separate_collision_group_per_env", False)
+
         # Define bounds: [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
         self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds", [[-2.0, 2.0], [1.0, 3.0], [-2.0, 2.0]]), device=device)
         self.arena_bounds = torch.tensor(kwargs.pop("arena_bounds", [[-8.0, 8.0], [0.0, 6.0], [-8.0, 8.0]]), device=device)
@@ -217,6 +477,10 @@ class DroneParcour(WarpEnv):
         # Simple observation like ant: position + velocity + target + actions = 16
         num_obs = 30
         num_act = 4  # Four thrust controls
+
+        # collision group indices
+        self.collision_group_index_obstacles = -1  # -1 means collide with everything
+        self.collision_group_index_agent = -1      # -1 means collide with everything
   
         self.applied_body_force = torch.zeros((num_envs, 4), device=device, requires_grad=True)        
         self.ground_plane = kwargs.pop("ground_plane", True)  # Whether to activate ground plane collision
@@ -232,7 +496,10 @@ class DroneParcour(WarpEnv):
             use_graph_capture=False,
             **kwargs,
         )
-       
+        
+        # allocate host-side storage for depth maps (torch)
+        self.depth_maps = torch.zeros((self.num_envs, self.depthcam_height, self.depthcam_width), device=self.device, dtype=torch.float32)
+
     def create_modelbuilder(self):
         """Create the model builder with drone-specific settings"""
         builder = super().create_modelbuilder()
@@ -240,38 +507,122 @@ class DroneParcour(WarpEnv):
         
         return builder
 
-    def add_shared_obstacles(self, builder):
-        # ================ add obstacles
-        random_factors_position = torch.rand((self.num_obstacles_max, 3))
-        random_factors_shapes = torch.rand((self.num_obstacles_max, 3))
-        random_orientations = torch.rand((self.num_obstacles_max, 3)) * 2.0 * math.pi
+    def add_static_shared_obstacles(self, builder):
+        """Add static obstacles including arena walls and maze-like structures"""
+        
+        # Get arena bounds
+        x_min, x_max = self.arena_bounds[0, 0].item(), self.arena_bounds[0, 1].item()
+        y_min, y_max = self.arena_bounds[1, 0].item(), self.arena_bounds[1, 1].item()
+        z_min, z_max = self.arena_bounds[2, 0].item(), self.arena_bounds[2, 1].item()
 
-        obstacle_positions = random_factors_position * (self.arena_bounds[:, 1] - self.arena_bounds[:, 0]).cpu() + self.arena_bounds[:, 0].cpu()
-        obstacle_shapes = random_factors_shapes * (self.obstacle_max_size - self.obstacle_min_size) + self.obstacle_min_size
+        wall_thickness = 0.1 
+        wall_height = y_max - y_min
+        ground_altiude = 0.0
 
-        quat_roll = quat_from_angle_axis(random_orientations[:,0], torch.tensor([1.0, 0.0, 0.0]).expand(self.num_obstacles_max, -1))
-        quat_pitch = quat_from_angle_axis(random_orientations[:, 1] , torch.tensor([0.0, 1.0, 0.0]).expand(self.num_obstacles_max, -1))
-        quat_yaw = quat_from_angle_axis(random_orientations[:, 2], torch.tensor([0.0, 0.0, 1.0]).expand(self.num_obstacles_max, -1))
+        # add floor
+        builder.add_shape_plane(
+            body=-1,
+            pos=(0.0, ground_altiude, 0.0),
+            width=(x_max - x_min)/2*1.5,            
+            length=(z_max - z_min)/2*1.5,            
+            has_shape_collision=True,            
+            is_visible=True,
+        )
 
-        # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
-        target_attitudes = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
-
-        self.obstacle_indices = torch.zeros((self.num_obstacles_max,), dtype=torch.int32)
-        for i in range(self.num_obstacles_max):
-            obstacle_idx = builder.add_body()                            
-
-            builder.add_shape_box(
-                obstacle_idx,
-                hx = obstacle_shapes[i, 0],
-                hy = obstacle_shapes[i, 1],
-                hz = obstacle_shapes[i, 2],                
-                is_solid=True,
-                has_shape_collision=True,
-                has_ground_collision=True,
-                is_visible=True,
-            )
-
-            self.obstacle_indices[i] = obstacle_idx
+        # Add 4 perimeter walls
+        # North wall (positive Z)
+        builder.add_shape_box(
+            -1,
+            pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
+            hx=(x_max - x_min)/2,
+            hy=wall_height/2,
+            hz=wall_thickness/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
+        
+        # South wall (negative Z)
+        builder.add_shape_box(
+            -1,
+            pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
+            hx=(x_max - x_min)/2,
+            hy=wall_height/2,
+            hz=wall_thickness/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
+        
+        # East wall (positive X)
+        builder.add_shape_box(
+            -1,
+            pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+            hx=wall_thickness/2,
+            hy=wall_height/2,
+            hz=(z_max - z_min)/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
+        
+        # West wall (negative X)
+        builder.add_shape_box(
+            -1,
+            pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+            hx=wall_thickness/2,
+            hy=wall_height/2,
+            hz=(z_max - z_min)/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
+        
+        # ================ Add maze walls ================        
+        maze_wall_length_min = 1.0
+        maze_wall_length_max = 6.0
+        num_maze_walls = 10 # Number of internal maze walls
+        
+        # Create maze walls with random positions and orientations
+        for i in range(num_maze_walls):
+            # Random wall length
+            wall_length = torch.rand(1).item() * (maze_wall_length_max - maze_wall_length_min) + maze_wall_length_min
+            
+            # Random position within arena (with margin to avoid boundary walls)
+            margin = 1.0
+            wall_x = (torch.rand(1).item() * (x_max - x_min - 2*margin) + x_min + margin)
+            wall_z = (torch.rand(1).item() * (z_max - z_min - 2*margin) + z_min + margin)
+            
+            # Random orientation (0 or 90 degrees for grid-like maze)
+            is_vertical = torch.rand(1).item() > 0.5
+            
+            if is_vertical:
+                # Vertical wall (extends in Z direction)
+                builder.add_shape_box(
+                    -1,
+                    pos=(wall_x, ground_altiude + wall_height/2, wall_z),
+                    hx=wall_thickness/2,
+                    hy=wall_height/2,
+                    hz=wall_length/2,
+                    is_solid=True,
+                    has_shape_collision=True,                    
+                    is_visible=True,
+                )
+            else:
+                # Horizontal wall (extends in X direction)
+                builder.add_shape_box(
+                    -1,
+                    pos=(wall_x, ground_altiude + wall_height/2, wall_z),
+                    hx=wall_length/2,
+                    hy=wall_height/2,
+                    hz=wall_thickness/2,
+                    is_solid=True,
+                    has_shape_collision=True,                    
+                    is_visible=True,
+                )
+        
+        # Store total number of obstacles for simulation view
+        self.num_static_obstacles = 1 + num_maze_walls  # 4 boundary walls + maze walls
         
     def create_model(self):
         """Create model and ensure control() allocates a differentiable user_act tensor."""
@@ -307,12 +658,12 @@ class DroneParcour(WarpEnv):
         
         # convex collision sphere 
         builder.add_shape_sphere(
-            body,
+            body,                        
             pos=(0.0, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0),
             radius=self.arm_specs[2]/2,
-            is_visible=False,
             density=0.0,
+            is_visible=False,            
             has_ground_collision=True,  # Enable ground collision detection
             has_shape_collision=True,
         )
@@ -415,9 +766,27 @@ class DroneParcour(WarpEnv):
     def init_sim(self):
         super().init_sim()
 
+        # Create simulation view for clean body access
+        self.sim_view = SimulationView(
+            model=self.model,
+            num_envs=self.num_envs,
+            num_obstacles=self.num_obstacles_max * 0
+        )
+
+        # Allocate Warp buffers for depth camera after model/device are known
+        self._depth_out_wp = wp.zeros(
+            (self.num_envs, self.depthcam_width * self.depthcam_height),
+            dtype=float,
+            device=self.model.device,
+            requires_grad=False,
+        )
+        self._depthcam_offset_b_wp = wp.vec3(float(self.depthcam_offset_b[0]), float(self.depthcam_offset_b[1]), float(self.depthcam_offset_b[2]))  # type: ignore[attr-defined]
+        self._depthcam_forward_b_wp = wp.vec3(float(self.depthcam_forward_b[0]), float(self.depthcam_forward_b[1]), float(self.depthcam_forward_b[2]))  # type: ignore[attr-defined]
+        self._depthcam_up_b_wp = wp.vec3(float(self.depthcam_up_b[0]), float(self.depthcam_up_b[1]), float(self.depthcam_up_b[2]))  # type: ignore[attr-defined]
+        self._depthcam_fov_y = float(self.depthcam_fov_y_deg * math.pi / 180.0)
+
         with torch.no_grad():
             self.start_rotation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
-
             # Initialize target positions for each environment
             self.target_body_q = torch.zeros((self.num_envs, 7), device=self.device, dtype=torch.float32)
             self.target_body_qd = torch.zeros((self.num_envs, 6), device=self.device, dtype=torch.float32)
@@ -426,6 +795,7 @@ class DroneParcour(WarpEnv):
         # Provide an external-forces callback via the model so newly-created
         # Control objects inherit it each step.
         self.model.apply_external_forces = self.apply_drone_forces
+        self.model.compute_collision_costs = self.compute_collision_costs
 
         # Create Warp arrays directly from stored prop data
         self._prop_positions_wp = wp.array(self.prop_positions, dtype=wp.vec3, device=self.model.device)  # type: ignore[attr-defined]
@@ -437,12 +807,99 @@ class DroneParcour(WarpEnv):
         drone_indices = list(range(self.num_envs))
         self._drone_body_index_wp = wp.array(drone_indices, dtype=int, device=self.model.device)  # type: ignore[attr-defined]
         
+        # Setup collision detection for reward computation
+        self.setup_collision_detection()
+        
         # Display drone specifications
         self.print_drone_specs()
         
         # Setup drone parameters and cache computed values
         self.setup_drone()
+
+    def setup_collision_detection(self):
+        """Setup arrays for collision cost computation"""
+        # Get all obstacle shape indices (walls and maze elements)
+        num_obstacles = getattr(self, 'num_static_obstacles', 0)
         
+        if num_obstacles > 0:
+            # Create obstacle indices array for each environment
+            # Each row represents one environment's obstacles to check against
+            obstacle_indices = []
+            for env_id in range(self.num_envs):
+                # All environments check against the same static obstacles (indices 0 to num_obstacles-1)
+                env_obstacles = list(range(num_obstacles))
+                obstacle_indices.append(env_obstacles)
+            
+            # Pad to same length if needed
+            max_obstacles_per_env = max(len(obs) for obs in obstacle_indices) if obstacle_indices else 0
+            for obs_list in obstacle_indices:
+                while len(obs_list) < max_obstacles_per_env:
+                    obs_list.append(-1)  # Padding with invalid indices
+            
+            self._obstacle_shape_indices = wp.array(obstacle_indices, dtype=int, device=self.model.device)
+            self._collision_margin = 0.1  # Collision margin for cost computation            
+            self._collision_costs = wp.zeros(self.num_envs, dtype=wp.float32, device=self.model.device, requires_grad=True)
+        else:
+            self._obstacle_shape_indices = None
+            
+    def compute_collision_costs(self):
+        """Compute collision costs between drones and obstacles using SDF with graph capture"""
+        if self._obstacle_shape_indices is None or self._obstacle_shape_indices.shape[1] == 0:
+            return torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+        
+        # Reset collision costs
+        self._collision_costs.zero_()
+        wp.launch(
+            collision_cost,
+            dim=(self.num_envs, self._obstacle_shape_indices.shape[1]),
+            inputs=[
+                self.state.body_q.detach(),  # Detach to remove gradients for Warp kernel
+                self._obstacle_shape_indices,
+                self.sim_view._drone_indices_wp,
+                self.model.shape_transform,
+                self.model.shape_geo,
+                self._collision_margin,                
+            ],
+            outputs=[self._collision_costs],
+            device=self.model.device
+        )
+    
+    def compute_depth_maps(self):
+        """Compute per-env depth maps via SDF-based sphere tracing. Result stored in self.depth_maps (torch)."""
+        if self._obstacle_shape_indices is None:
+            # if no obstacles configured, fill with far plane
+            self.depth_maps.fill_(self.depthcam_far)
+            return
+
+        num_obs_per_env = int(self._obstacle_shape_indices.shape[1])
+
+        wp.launch(
+            depth_sphere_trace_kernel,
+            dim=(self.num_envs, self.depthcam_width * self.depthcam_height),
+            inputs=(
+                self.state.body_q.detach(),
+                self.sim_view._drone_indices_wp,
+                self.model.shape_transform,
+                self.model.shape_geo,
+                self._obstacle_shape_indices,
+                num_obs_per_env,
+                int(self.depthcam_width),
+                int(self.depthcam_height),
+                float(self._depthcam_fov_y),
+                float(self.depthcam_near),
+                float(self.depthcam_far),
+                self._depthcam_offset_b_wp,
+                self._depthcam_forward_b_wp,
+                self._depthcam_up_b_wp,
+            ),
+            outputs=(self._depth_out_wp,),
+            device=self.model.device,
+        )
+
+        # copy to torch buffer and reshape
+        d = wp.to_torch(self._depth_out_wp)
+        self.depth_maps = d.view(self.num_envs, self.depthcam_height, self.depthcam_width)
+
     def setup_drone(self):
         """Setup drone parameters and cache computed values. Can be called to reset/randomize parameters."""
         # Calculate and cache max RPM from motor specifications
@@ -562,7 +1019,7 @@ class DroneParcour(WarpEnv):
                 model.body_com,
                 state.body_qd,
                 state.body_f,
-                self._drone_body_index_wp,                
+                self.sim_view._drone_indices_wp,                
                 control.body_force,
                 self._prop_positions_wp,
                 self._thrust_dir_local_wp,
@@ -674,13 +1131,12 @@ class DroneParcour(WarpEnv):
 
     @torch.no_grad()
     def randomize_init(self, env_ids):        
-        """Randomize drone spawn positions following ant pattern"""
-        # For rigid body drone, use body_q instead of joint_q
-        body_q = self.state.body_q[int(self.obstacle_indices[-1]+1):, :]
-        body_qd = self.state.body_qd[int(self.obstacle_indices[-1]+1):, :]
-
+        """Randomize drone spawn positions using SimulationView"""
         N = len(env_ids)
         
+        # Get drone states using the simulation view
+        body_q, body_qd = self.sim_view.get_drone_states(self.state)
+
         ##  ================== sample initial pose ========================
         # generate random initial drone attitudes            
         randomized_initial_orientation = self.initial_drone_attitude_euler_deg.repeat(N, 1) / 180.0 * math.pi
@@ -718,15 +1174,20 @@ class DroneParcour(WarpEnv):
     def pre_physics_step(self, actions):        
         # Clamp actions to [-1, 1] range
         actions = torch.clamp(actions, -1.0, 1.0)        
-        body_force = (actions + 1.0) * 0.5    
-        self.applied_body_force = body_force.detach()       
+        body_force = (actions + 1.0) * 0.5
+        self.applied_body_force = body_force.detach()        # for observations and rewards
         # body_force = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device, requires_grad=True)
         self.control.assign("body_force", body_force)        
     
     def compute_observations(self):
-        """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
-        body_q = self.state.body_q.clone()
-        body_qd = self.state.body_qd.clone()
+        """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions.
+        Also computes and stores a per-env depth map in self.depth_maps.
+        If include_depth_in_obs is True, the flattened depth map is appended to the vector observation."""
+        # First, compute depth maps (kept separate from vector obs by default)
+        self.compute_depth_maps()
+
+        # Get drone states using the simulation view
+        body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
         # position and orientation
         pos = body_q[:, 0:3]
@@ -741,23 +1202,12 @@ class DroneParcour(WarpEnv):
         ang_vel = body_qd[:, 0:3]
         # target direction in body frame and distance
         vec_to_target_world = self.target_body_q[:, :3] - pos
-        # vec_to_target_body = quat_rotate(quat_conjugate(quat), vec_to_target_world)
-        # dir_to_target_body = normalize(vec_to_target_body)
         dir_to_target_world = vec_to_target_world / torch.norm(vec_to_target_world, dim=1, keepdim=True)
         dist_to_target = torch.norm(vec_to_target_world, dim=1, keepdim=True)
 
         # last actions
         last_actions = self.applied_body_force # shape (N, 4)
 
-        # obs_parts = [
-        #     pos,                # 3
-        #     up_axis,            # 3 (world up)
-        #     lin_vel,            # 3
-        #     ang_vel,            # 3
-        #     dir_to_target_world, # 3 (in world frame)
-        #     dist_to_target,     # 1
-        #     last_actions,       # 4
-        # ]
         obs_parts = [
             body_q,
             body_qd,
@@ -765,6 +1215,10 @@ class DroneParcour(WarpEnv):
             self.target_body_qd,
             last_actions
         ]
+
+        if self.include_depth_in_obs:
+            obs_parts.append(self.depth_maps.view(self.num_envs, -1))
+
         obs = torch.cat(obs_parts, dim=-1)
 
         # Pad to configured num_obs if needed
@@ -773,11 +1227,10 @@ class DroneParcour(WarpEnv):
             obs = torch.cat([obs, pad], dim=-1)
 
         self.obs_buf = obs
-            
+
     def compute_reward(self):
-        # Basic state
-        body_q = self.state.body_q.clone()
-        body_qd = self.state.body_qd.clone()
+        # Get drone states using the simulation view
+        body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
         pos = body_q[:,0:3]
 
@@ -828,6 +1281,9 @@ class DroneParcour(WarpEnv):
         how_much_spinning_too_fast = ang_speed - max_ang_speed
         ratelimit_penalty = -torch.nn.functional.softplus(how_much_spinning_too_fast + start_penalizing_before_ratelimit, beta=beta_softplus_ang_speed)
 
+        # ===================== Collision Cost =========================
+        collision_penalty = - 1.0 * wp.to_torch(self._collision_costs)        
+
         progress_reward = 0.001 * self.progress_buf
         
         reward = (
@@ -836,6 +1292,7 @@ class DroneParcour(WarpEnv):
             # + action_penalty         # action cost
             + outside_penalty  # arena boundary barriers (differentiable)
             + ratelimit_penalty  # angular speed barrier (differentiable)
+            + collision_penalty  # collision avoidance (differentiable SDF-based)
             # + orientation_penalty * target_proximity_reward # penalize orientation error at goal
             # + target_rate_mismatch_penalty * target_proximity_reward # penalize target rate mismatch at goal
         )
