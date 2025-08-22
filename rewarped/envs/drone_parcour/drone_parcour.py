@@ -4,6 +4,7 @@ import math
 import torch
 import warp as wp
 import warp.sim  # ensure wp.sim types are loaded
+import numpy as np
 
 from rewarped.warp_env import WarpEnv
 from rewarped.warp.model_monkeypatch import Model_control
@@ -197,6 +198,114 @@ def collision_cost(
         c = margin - d
         wp.atomic_add(cost, env_id, c)
 
+
+@wp.func
+def sdf_shape_distance_world(
+    x_world: wp.vec3,
+    shape_index: int,
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,
+) -> float:
+    X_bs = shape_X_bs[shape_index]
+    x_local = wp.transform_point(wp.transform_inverse(X_bs), x_world)
+
+    geo_type = geo.type[shape_index]
+    geo_scale = geo.scale[shape_index]
+
+    d = 1.0e6
+    if geo_type == wp.sim.GEO_SPHERE:
+        d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
+    elif geo_type == wp.sim.GEO_BOX:
+        d = box_sdf(geo_scale, x_local)
+    elif geo_type == wp.sim.GEO_CAPSULE:
+        d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
+    elif geo_type == wp.sim.GEO_CYLINDER:
+        d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
+    elif geo_type == wp.sim.GEO_CONE:
+        d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
+    elif geo_type == wp.sim.GEO_MESH:
+        mesh = geo.source[shape_index]
+        min_scale = wp.min(geo_scale)
+        max_dist = 0.25 / min_scale
+        d = mesh_sdf(mesh, wp.cw_div(x_local, geo_scale), max_dist) * min_scale
+    elif geo_type == wp.sim.GEO_SDF:
+        volume = geo.source[shape_index]
+        xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
+        nn = wp.vec3(0.0, 0.0, 0.0)
+        d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, nn)
+    elif geo_type == wp.sim.GEO_PLANE:
+        d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
+
+    return d
+
+
+@wp.kernel
+def render_depth_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    drone_body_index: wp.array(dtype=int),
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,
+    obstacle_ids: wp.array(dtype=int, ndim=2),
+    num_shapes: int,
+    cam_dirs_local: wp.array(dtype=wp.vec3),
+    cam_pos_local: wp.vec3,
+    width: int,
+    height: int,
+    min_depth: float,
+    max_depth: float,
+    depths: wp.array(dtype=float, ndim=2),  # [num_envs, width*height]
+):
+    env_id, pix = wp.tid()
+
+    # fetch body transform for this env
+    body_idx = drone_body_index[env_id]
+    tf_b = body_q[body_idx]
+
+    # camera origin and ray direction in world
+    ro = wp.transform_point(tf_b, cam_pos_local)
+    rd = wp.normalize(wp.transform_vector(tf_b, cam_dirs_local[pix]))
+
+    # sphere tracing
+    t = min_depth
+    hit_t = max_depth
+
+    # loop bounds
+    MAX_STEPS = 64
+    EPS_HIT = 1.0e-3
+
+    # number of obstacle shapes for this env
+    # obstacle_ids is padded with -1 for invalid slots
+    for step in range(MAX_STEPS):
+        if t > max_depth:
+            break
+
+        p = ro + rd * t
+
+        # evaluate min signed distance over all shapes
+        d_min = 1.0e6
+
+        # iterate shapes
+        for s in range(num_shapes):
+            shape_index = obstacle_ids[env_id, s]
+            if shape_index < 0:
+                continue
+            d = sdf_shape_distance_world(p, shape_index, shape_X_bs, geo)
+            d = wp.max(d, 0.0)
+            d_min = wp.min(d_min, d)
+
+        if d_min < EPS_HIT:
+            hit_t = t
+            break
+
+        # conservative step
+        if d_min > 0.0:
+            t = t + d_min
+        else:
+            # guard against zero step
+            t = t + 1.0e-3
+
+    depths[env_id, pix] = wp.clamp(hit_t, min_depth, max_depth)
+
 @wp.kernel
 def apply_drone_forces_kernel(
     body_q: wp.array(dtype=wp.transform),
@@ -341,6 +450,19 @@ class DroneParcour(WarpEnv):
         # Extract render settings from config
         render = kwargs.pop("render", False)
         render_mode = kwargs.pop("render_mode", "none")
+
+        # Depth camera parameters
+        self.cam_width = kwargs.pop("cam_width", 48)
+        self.cam_height = kwargs.pop("cam_height", 32)
+        self.cam_fov_x_deg = kwargs.pop("cam_fov_x_deg", 90.0)
+        self.cam_fov_y_deg = kwargs.pop("cam_fov_y_deg", 60.0)
+        self.cam_min_depth = kwargs.pop("cam_min_depth", 1.0)
+        self.cam_max_depth = kwargs.pop("cam_max_depth", 8.0)
+        # Mounted slightly in front of body center along +X (forward)
+        self.cam_offset_local = kwargs.pop(
+            "cam_offset_local",
+            [self.body_dimensions[0] / 2.0 + 0.02, 0.0, 0.0],
+        )
         
         # Simple observation like ant: position + velocity + target + actions = 16
         num_obs = 30
@@ -669,6 +791,39 @@ class DroneParcour(WarpEnv):
         
         # Setup drone parameters and cache computed values
         self.setup_drone()
+
+        # ================= Depth camera setup =================
+        # Precompute local ray directions (unit)
+        fovx = math.radians(self.cam_fov_x_deg)
+        fovy = math.radians(self.cam_fov_y_deg)
+        tan_x = math.tan(fovx * 0.5)
+        tan_y = math.tan(fovy * 0.5)
+        W = int(self.cam_width)
+        H = int(self.cam_height)
+        dirs = np.zeros((W * H, 3), dtype=np.float32)
+        idx = 0
+        for j in range(H):
+            v = (float(j) + 0.5) / float(H) * 2.0 - 1.0
+            for i in range(W):
+                u = (float(i) + 0.5) / float(W) * 2.0 - 1.0
+                dx = 1.0
+                dy = -v * tan_y
+                dz = u * tan_x
+                inv = 1.0 / math.sqrt(dx * dx + dy * dy + dz * dz)
+                dirs[idx, 0] = dx * inv
+                dirs[idx, 1] = dy * inv
+                dirs[idx, 2] = dz * inv
+                idx += 1
+
+        self._cam_dirs_local_wp = wp.array(dirs, dtype=wp.vec3, device=self.model.device)  # type: ignore[attr-defined]
+        self._cam_pos_local_wp = wp.vec3(float(self.cam_offset_local[0]), float(self.cam_offset_local[1]), float(self.cam_offset_local[2]))  # type: ignore[attr-defined]
+        self._cam_depths_wp = wp.full(
+            (self.num_envs, W * H),
+            float(self.cam_max_depth),
+            dtype=float,
+            device=self.model.device,
+            requires_grad=self.requires_grad,
+        )
 
     def setup_collision_detection(self):
         """Setup arrays for collision cost computation"""
@@ -1023,6 +1178,40 @@ class DroneParcour(WarpEnv):
         # last actions
         last_actions = self.applied_body_force # shape (N, 4)
 
+        # ================= Depth rendering =================
+        obs_indices = getattr(self, "_obstacle_shape_indices", None)
+        if obs_indices is not None and int(obs_indices.shape[1]) > 0:
+            wp.launch(
+                render_depth_kernel,
+                dim=(self.num_envs, self.cam_width * self.cam_height),
+                inputs=[
+                    self.state.body_q.detach(),
+                    self._drone_body_index_wp,
+                    self.model.shape_transform,
+                    self.model.shape_geo,
+                    obs_indices,
+                    int(obs_indices.shape[1]),
+                    self._cam_dirs_local_wp,
+                    self._cam_pos_local_wp,
+                    int(self.cam_width),
+                    int(self.cam_height),
+                    float(self.cam_min_depth),
+                    float(self.cam_max_depth),
+                ],
+                outputs=[self._cam_depths_wp],
+                device=self.model.device,
+            )
+            cam_depths_torch = wp.to_torch(self._cam_depths_wp)
+        else:
+            cam_depths_torch = torch.full(
+                (self.num_envs, self.cam_width * self.cam_height),
+                float(self.cam_max_depth),
+                device=self.device,
+                dtype=torch.float32,
+            )
+        # expose reshaped depth for consumers (HxW)
+        self.depth_maps = cam_depths_torch.view(self.num_envs, self.cam_height, self.cam_width)
+
         # obs_parts = [
         #     pos,                # 3
         #     up_axis,            # 3 (world up)
@@ -1037,7 +1226,7 @@ class DroneParcour(WarpEnv):
             body_qd,
             self.target_body_q,
             self.target_body_qd,
-            last_actions
+            last_actions,
         ]
         obs = torch.cat(obs_parts, dim=-1)
 
