@@ -43,11 +43,10 @@ def sim_update(sim_params, model, states, control):
         wp.sim.collide(model, state_0)
         
         # allow environments to add external (non-joint) forces after collisions
-        if hasattr(control, "apply_external_forces") and control.apply_external_forces is not None:
-            control.apply_external_forces(model, state_0, control)
-        if hasattr(control, "compute_collision_costs") and control.compute_collision_costs is not None:
-            control.compute_collision_costs()
-
+        control.apply_external_forces(model, state_0, control)
+        control.compute_collision_distances(model, state_0)
+        control.compute_depth_observations(model, state_0)
+        
         integrator.simulate(model, state_0, state_1, sim_dt, control=control)
         state_0 = state_1
 

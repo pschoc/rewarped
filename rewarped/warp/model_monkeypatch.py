@@ -5,7 +5,7 @@ from warp.sim.model import Control, Model, State
 # Minimal extension to allow environments to attach a callable that applies
 # external forces each substep (used for non-articulated control like drones).
 class ExternalControl(Control):
-    __slots__ = ("apply_external_forces", "compute_collision_costs")
+    __slots__ = ("apply_external_forces", "compute_collision_distance", "compute_depth_observations")
 
 
 def get_copy_fn(copy):
@@ -150,6 +150,8 @@ def Model_control(self: Model, requires_grad=None, clone_variables=True, copy="c
     # so physics can call it each substep (see warp_utils.sim_update).
     c.apply_external_forces = getattr(self, "apply_external_forces", None)
 
-    c.compute_collision_costs = getattr(self, "compute_collision_costs", None)
+    c.compute_collision_distances = getattr(self, "compute_collision_distances", None)
+
+    c.compute_depth_observations = getattr(self, "compute_depth_observations", None)
 
     return c

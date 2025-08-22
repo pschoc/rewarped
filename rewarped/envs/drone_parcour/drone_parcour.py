@@ -16,69 +16,69 @@ from warp.sim.collide import box_sdf, capsule_sdf, cone_sdf, cylinder_sdf, mesh_
 class SimulationView:
     """View class to access drone and obstacle bodies from the full simulation state"""
     
-    def __init__(self, model, num_envs, num_obstacles):
+    def __init__(self, model, num_envs, num_mobile_obstacles):
         self.model = model
         self.device = model.device
         self.num_envs = num_envs
-        self.num_obstacles = num_obstacles # currently all only shapes
-        
+        self.num_mobile_obstacles = num_mobile_obstacles # currently all only shapes        
+
         # Body indices: obstacles come first, then drones
-        self.obstacle_indices = list(range(num_obstacles))
-        self.drone_indices = list(range(num_obstacles, num_obstacles + num_envs))
+        self.obstacle_indices = list(range(num_mobile_obstacles))
+        self.drone_indices = list(range(num_mobile_obstacles, num_mobile_obstacles + num_envs))
         
         # Create warp arrays for efficient GPU access
-        self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if num_obstacles > 0 else None
+        self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if num_mobile_obstacles > 0 else None
         self._drone_indices_wp = wp.array(self.drone_indices, dtype=int, device=self.device)
-    
+        
     def get_drone_positions(self, state):
         """Get drone positions from full state"""
-        return state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, :3]
+        return state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3]
     
     def get_drone_orientations(self, state):
         """Get drone orientations from full state"""
-        return state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, 3:7]
+        return state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:7]
     
     def get_drone_velocities(self, state):
         """Get drone linear velocities from full state"""
-        return state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, 3:6]
+        return state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:6]
     
     def get_drone_angular_velocities(self, state):
         """Get drone angular velocities from full state"""
-        return state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, :3]
+        return state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3]
     
     def get_drone_states(self, state):
         """Get full drone body_q and body_qd"""
-        body_q = state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs]
-        body_qd = state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs]
+        body_q = state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
+        body_qd = state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
         return body_q, body_qd
     
     def set_drone_positions(self, state, positions):
         """Set drone positions in full state"""
-        state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, :3] = positions
+        state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3] = positions
     
     def set_drone_orientations(self, state, orientations):
         """Set drone orientations in full state"""
-        state.body_q[self.num_obstacles:self.num_obstacles + self.num_envs, 3:7] = orientations
+        state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:7] = orientations
     
     def set_drone_velocities(self, state, velocities):
         """Set drone linear velocities in full state"""
-        state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, 3:6] = velocities
+        state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:6] = velocities
     
     def set_drone_angular_velocities(self, state, angular_velocities):
         """Set drone angular velocities in full state"""
-        state.body_qd[self.num_obstacles:self.num_obstacles + self.num_envs, :3] = angular_velocities
+        state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3] = angular_velocities
     
     def get_obstacle_positions(self, state):
         """Get obstacle positions from full state"""
-        if self.num_obstacles == 0:
+        if self.num_mobile_obstacles == 0:
             return None
-        return state.body_q[:self.num_obstacles, :3]
+        return state.body_q[:self.num_mobile_obstacles, :3]
     
     def get_obstacle_orientations(self, state):
         """Get obstacle orientations from full state"""
-        if self.num_obstacles == 0:
+        if self.num_mobile_obstacles == 0:
             return None
-        return state.body_q[:self.num_obstacles, 3:7]
+        return state.body_q[:self.num_mobile_obstacles, 3:7]
 
 
 class Propeller:
@@ -140,65 +140,6 @@ def define_propeller(
     
     return prop
 
-
-@wp.kernel
-def collision_cost(
-    body_q: wp.array(dtype=wp.transform),
-    obstacle_ids: wp.array(dtype=int, ndim=2),
-    drone_body_index: wp.array(dtype=int),
-    shape_X_bs: wp.array(dtype=wp.transform),
-    geo: wp.sim.ModelShapeGeometry,
-    margin: float,    
-    cost: wp.array(dtype=wp.float32),
-):
-    env_id, obs_id = wp.tid()
-    shape_index = obstacle_ids[env_id, obs_id]
-
-    drone_idx = drone_body_index[env_id]
-    px = wp.transform_get_translation(body_q[drone_idx])
-
-    X_bs = shape_X_bs[shape_index]
-
-    # transform particle position to shape local space
-    x_local = wp.transform_point(wp.transform_inverse(X_bs), px)
-
-    # geo description
-    geo_type = geo.type[shape_index]
-    geo_scale = geo.scale[shape_index]
-
-    # evaluate shape sdf
-    d = 1e6
-
-    if geo_type == wp.sim.GEO_SPHERE:
-        d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
-    elif geo_type == wp.sim.GEO_BOX:
-        d = box_sdf(geo_scale, x_local)
-    elif geo_type == wp.sim.GEO_CAPSULE:
-        d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
-    elif geo_type == wp.sim.GEO_CYLINDER:
-        d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
-    elif geo_type == wp.sim.GEO_CONE:
-        d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
-    elif geo_type == wp.sim.GEO_MESH:
-        mesh = geo.source[shape_index]
-        min_scale = wp.min(geo_scale)
-        max_dist = margin / min_scale
-        d = mesh_sdf(mesh, wp.cw_div(x_local, geo_scale), max_dist)
-        d *= min_scale  # TODO fix this, mesh scaling needs to be handled properly
-    elif geo_type == wp.sim.GEO_SDF:
-        volume = geo.source[shape_index]
-        xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
-        nn = wp.vec3(0.0, 0.0, 0.0)
-        d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, nn)
-    elif geo_type == wp.sim.GEO_PLANE:
-        d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
-
-    d = wp.max(d, 0.0)
-    if d < margin:
-        c = margin - d
-        wp.atomic_add(cost, env_id, c)
-
-
 @wp.func
 def sdf_shape_distance_world(
     x_world: wp.vec3,
@@ -240,6 +181,31 @@ def sdf_shape_distance_world(
 
 
 @wp.kernel
+def collision_distance_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    indices_shape_with_collision: wp.array(dtype=int),    
+    drone_body_index: wp.array(dtype=int),
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,      
+    shape_body: wp.array(dtype=int),
+    depths: wp.array(dtype=float, ndim=2),    
+):
+    env_id, obs_id = wp.tid()
+    shape_index = indices_shape_with_collision[obs_id]
+    drone_idx = drone_body_index[env_id]
+
+    if shape_body[shape_index] == drone_idx:
+        d = float(1.0e6) # max val                
+    else:
+        px = wp.transform_get_translation(body_q[drone_idx])
+        d = sdf_shape_distance_world(px, shape_index, shape_X_bs, geo)
+
+    d = wp.max(d, 0.0)
+    
+    depths[env_id, obs_id] = d
+
+
+@wp.kernel
 def render_depth_kernel(
     body_q: wp.array(dtype=wp.transform),
     drone_body_index: wp.array(dtype=int),
@@ -248,9 +214,7 @@ def render_depth_kernel(
     obstacle_ids: wp.array(dtype=int, ndim=2),
     num_shapes: int,
     cam_dirs_local: wp.array(dtype=wp.vec3),
-    cam_pos_local: wp.vec3,
-    width: int,
-    height: int,
+    cam_pos_local: wp.vec3,        
     min_depth: float,
     max_depth: float,
     depths: wp.array(dtype=float, ndim=2),  # [num_envs, width*height]
@@ -281,15 +245,15 @@ def render_depth_kernel(
 
         p = ro + rd * t
 
-        # evaluate min signed distance over all shapes
-        d_min = 1.0e6
+        # evaluate min signed distance over all shapes (must be dynamic in a dynamic loop)
+        d_min = float(1.0e6)
 
         # iterate shapes
         for s in range(num_shapes):
             shape_index = obstacle_ids[env_id, s]
             if shape_index < 0:
                 continue
-            d = sdf_shape_distance_world(p, shape_index, shape_X_bs, geo)
+            d = sdf_shape_distance_world(p, shape_index, shape_X_bs, geo)            
             d = wp.max(d, 0.0)
             d_min = wp.min(d_min, d)
 
@@ -362,7 +326,7 @@ def apply_drone_forces_kernel(
         total_force += f_i
         total_torque += t_i - drag_torque
    
-    total_torque *= 0.9 # dampening
+    total_torque *= 0.7 # dampening
 
     sf = body_f[body_idx]
     body_f[body_idx] = wp.spatial_vector(  # type: ignore[attr-defined]
@@ -389,12 +353,19 @@ class DroneParcour(WarpEnv):
         self.render_fps = kwargs.pop("render_fps", 10)  # Frames per second for rendering
         self.integrator_type = IntegratorType(kwargs.pop("integrator", IntegratorType.XPBD))  # Default to XPBD integrator
         self.separate_collision_group_per_env = kwargs.pop("separate_collision_group_per_env", False)
+        self.use_graph_capture = kwargs.pop("use_graph_capture", True)
+        self.use_depth_observations = kwargs.pop("use_depth_observations", False)
+        self.use_collision_distances = kwargs.pop("use_collision_distances", False)
+        self.debug_pov = kwargs.pop("debug_pov", False)
+        self.ground_plane = kwargs.pop("ground_plane", True)
 
         # Define bounds: [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
         self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds", [[-2.0, 2.0], [1.0, 3.0], [-2.0, 2.0]]), device=device)
         self.arena_bounds = torch.tensor(kwargs.pop("arena_bounds", [[-8.0, 8.0], [0.0, 6.0], [-8.0, 8.0]]), device=device)
         self.target_bounds = torch.tensor(kwargs.pop("target_bounds", [[-6.0, 6.0], [1.0, 5.0], [-6.0, 6.0]]), device=device)
-        self.num_obstacles_max = kwargs.pop("num_obstacles_max", 5)
+        self.room_bounds = torch.tensor(kwargs.pop("room_bounds", [[-10.0, 10.0], [0.0, 4.0], [-10.0, 10.0]]), device=device)
+
+        self.num_static_obstacles = kwargs.pop("num_static_obstacles", 5)
         self.obstacle_min_size = kwargs.pop("obstacle_min_size", 0.2)
         self.obstacle_max_size = kwargs.pop("obstacle_max_size", 0.5)
         self.termination_distance = kwargs.pop("termination_distance", 0.2)
@@ -465,7 +436,7 @@ class DroneParcour(WarpEnv):
         )
         
         # Simple observation like ant: position + velocity + target + actions = 16
-        num_obs = 30
+        num_obs = 30 + self.cam_width * self.cam_height 
         num_act = 4  # Four thrust controls
 
         # collision group indices
@@ -473,7 +444,7 @@ class DroneParcour(WarpEnv):
         self.collision_group_index_agent = -1      # -1 means collide with everything
   
         self.applied_body_force = torch.zeros((num_envs, 4), device=device, requires_grad=True)        
-        self.ground_plane = kwargs.pop("ground_plane", True)  # Whether to activate ground plane collision
+        
         # Now call super with only the parameters it expects
         super().__init__(
             num_envs=num_envs,
@@ -483,7 +454,7 @@ class DroneParcour(WarpEnv):
             early_termination=early_termination,
             render=render,
             render_mode=render_mode,
-            use_graph_capture=False,
+            use_graph_capture=True,
             **kwargs,
         )
        
@@ -498,80 +469,69 @@ class DroneParcour(WarpEnv):
         """Add static obstacles including arena walls and maze-like structures"""
         
         # Get arena bounds
-        x_min, x_max = self.arena_bounds[0, 0].item(), self.arena_bounds[0, 1].item()
-        y_min, y_max = self.arena_bounds[1, 0].item(), self.arena_bounds[1, 1].item()
-        z_min, z_max = self.arena_bounds[2, 0].item(), self.arena_bounds[2, 1].item()
+        x_min, x_max = self.room_bounds[0, 0].item(), self.room_bounds[0, 1].item()
+        y_min, y_max = self.room_bounds[1, 0].item(), self.room_bounds[1, 1].item()
+        z_min, z_max = self.room_bounds[2, 0].item(), self.room_bounds[2, 1].item()
 
         wall_thickness = 0.1 
         wall_height = y_max - y_min
         ground_altiude = 0.0
 
-        # add floor
-        builder.add_shape_plane(
-            body=-1,
-            pos=(0.0, ground_altiude, 0.0),
-            width=(x_max - x_min)/2*1.5,            
-            length=(z_max - z_min)/2*1.5,            
-            has_shape_collision=True,            
-            is_visible=True,
-        )
-
-        # Add 4 perimeter walls
-        # North wall (positive Z)
-        builder.add_shape_box(
-            -1,
-            pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
-            hx=(x_max - x_min)/2,
-            hy=wall_height/2,
-            hz=wall_thickness/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
+        # # Add 4 perimeter walls
+        # # North wall (positive Z)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
+        #     hx=(x_max - x_min)/2,
+        #     hy=wall_height/2,
+        #     hz=wall_thickness/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
         
-        # South wall (negative Z)
-        builder.add_shape_box(
-            -1,
-            pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
-            hx=(x_max - x_min)/2,
-            hy=wall_height/2,
-            hz=wall_thickness/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
+        # # South wall (negative Z)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
+        #     hx=(x_max - x_min)/2,
+        #     hy=wall_height/2,
+        #     hz=wall_thickness/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
         
-        # East wall (positive X)
-        builder.add_shape_box(
-            -1,
-            pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
-            hx=wall_thickness/2,
-            hy=wall_height/2,
-            hz=(z_max - z_min)/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
+        # # East wall (positive X)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+        #     hx=wall_thickness/2,
+        #     hy=wall_height/2,
+        #     hz=(z_max - z_min)/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
         
-        # West wall (negative X)
-        builder.add_shape_box(
-            -1,
-            pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
-            hx=wall_thickness/2,
-            hy=wall_height/2,
-            hz=(z_max - z_min)/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
+        # # West wall (negative X)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+        #     hx=wall_thickness/2,
+        #     hy=wall_height/2,
+        #     hz=(z_max - z_min)/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
         
         # ================ Add maze walls ================        
         maze_wall_length_min = 1.0
-        maze_wall_length_max = 6.0
-        num_maze_walls = 10 # Number of internal maze walls
+        maze_wall_length_max = 6.0        
         
         # Create maze walls with random positions and orientations
-        for i in range(num_maze_walls):
+        for i in range(self.num_static_obstacles):
             # Random wall length
             wall_length = torch.rand(1).item() * (maze_wall_length_max - maze_wall_length_min) + maze_wall_length_min
             
@@ -607,9 +567,8 @@ class DroneParcour(WarpEnv):
                     has_shape_collision=True,                    
                     is_visible=True,
                 )
-        
-        # Store total number of obstacles for simulation view
-        self.num_static_obstacles = 1 + num_maze_walls  # 4 boundary walls + maze walls
+
+        self.num_static_obstacles = 0 + self.num_static_obstacles # increase by 5 for boundary walls
         
     def create_model(self):
         """Create model and ensure control() allocates a differentiable user_act tensor."""
@@ -642,17 +601,23 @@ class DroneParcour(WarpEnv):
         # Calculate virtual density to achieve target body mass
         body_volume = self.body_dimensions[0] * self.body_dimensions[1] * self.body_dimensions[2]
         virtual_density = self.body_mass / body_volume
-        
-        # convex collision sphere 
-        builder.add_shape_sphere(
-            body,                        
+
+        # arm length
+        arm_length = self.arm_specs[2] / 2
+        print(f"arm_length: {arm_length}")
+
+        # collision box prevents rolling over behavior in the beginning of training
+        builder.add_shape_box(
+            body,
             pos=(0.0, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0),
-            radius=self.arm_specs[2]/2,
+            hx=arm_length*1.3, # padded span
+            hy=self.body_dimensions[2]/2,  # height/2
+            hz=arm_length*1.3, # padded span
             density=0.0,
-            is_visible=False,            
-            has_ground_collision=True,  # Enable ground collision detection
+            is_visible=False,
             has_shape_collision=True,
+            has_ground_collision=True,
         )
         
         # main body (battery, fc, ...)
@@ -669,11 +634,7 @@ class DroneParcour(WarpEnv):
         )
        
         # build props and arms
-        props = []
-        
-        # arm length
-        arm_length = self.arm_specs[2] / 2
-        print(f"arm_length: {arm_length}")
+        props = []        
         
         arm_rot = [
             math.pi/4, 
@@ -757,7 +718,7 @@ class DroneParcour(WarpEnv):
         self.sim_view = SimulationView(
             model=self.model,
             num_envs=self.num_envs,
-            num_obstacles=self.num_obstacles_max * 0
+            num_mobile_obstacles=0
         )
 
         with torch.no_grad():
@@ -771,7 +732,8 @@ class DroneParcour(WarpEnv):
         # Provide an external-forces callback via the model so newly-created
         # Control objects inherit it each step.
         self.model.apply_external_forces = self.apply_drone_forces
-        self.model.compute_collision_costs = self.compute_collision_costs
+        self.model.compute_collision_distances = self.compute_collision_distances
+        self.model.compute_depth_observations = self.compute_depth_observations
 
         # Create Warp arrays directly from stored prop data
         self._prop_positions_wp = wp.array(self.prop_positions, dtype=wp.vec3, device=self.model.device)  # type: ignore[attr-defined]
@@ -782,9 +744,7 @@ class DroneParcour(WarpEnv):
         # drone body index per env (assumes 1 dynamic body per env)
         drone_indices = list(range(self.num_envs))
         self._drone_body_index_wp = wp.array(drone_indices, dtype=int, device=self.model.device)  # type: ignore[attr-defined]
-        
-        # Setup collision detection for reward computation
-        self.setup_collision_detection()
+
         
         # Display drone specifications
         self.print_drone_specs()
@@ -825,59 +785,16 @@ class DroneParcour(WarpEnv):
             requires_grad=self.requires_grad,
         )
 
-    def setup_collision_detection(self):
-        """Setup arrays for collision cost computation"""
-        # Get all obstacle shape indices (walls and maze elements)
-        num_obstacles = getattr(self, 'num_static_obstacles', 0)
+        # container for collision distances        
+        self.indices_shape_with_collision = wp.array([i for i, x in enumerate(self.model.shape_shape_collision) if x], dtype=int, device=self.model.device)        
+        self._collision_distances = wp.zeros([self.num_envs, len(self.indices_shape_with_collision)], dtype=wp.float32, device=self.model.device, requires_grad=True)
         
-        if num_obstacles > 0:
-            # Create obstacle indices array for each environment
-            # Each row represents one environment's obstacles to check against
-            obstacle_indices = []
-            for env_id in range(self.num_envs):
-                # All environments check against the same static obstacles (indices 0 to num_obstacles-1)
-                env_obstacles = list(range(num_obstacles))
-                obstacle_indices.append(env_obstacles)
             
-            # Pad to same length if needed
-            max_obstacles_per_env = max(len(obs) for obs in obstacle_indices) if obstacle_indices else 0
-            for obs_list in obstacle_indices:
-                while len(obs_list) < max_obstacles_per_env:
-                    obs_list.append(-1)  # Padding with invalid indices
-            
-            self._obstacle_shape_indices = wp.array(obstacle_indices, dtype=int, device=self.model.device)
-            self._collision_margin = 0.1  # Collision margin for cost computation            
-            self._collision_costs = wp.zeros(self.num_envs, dtype=wp.float32, device=self.model.device, requires_grad=True)
-        else:
-            self._obstacle_shape_indices = None
-            
-    def compute_collision_costs(self):
-        """Compute collision costs between drones and obstacles using SDF with graph capture"""
-        if self._obstacle_shape_indices is None or self._obstacle_shape_indices.shape[1] == 0:
-            return torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
-        
-        # Reset collision costs
-        self._collision_costs.zero_()
-        wp.launch(
-            collision_cost,
-            dim=(self.num_envs, self._obstacle_shape_indices.shape[1]),
-            inputs=[
-                self.state.body_q.detach(),  # Detach to remove gradients for Warp kernel
-                self._obstacle_shape_indices,
-                self.sim_view._drone_indices_wp,
-                self.model.shape_transform,
-                self.model.shape_geo,
-                self._collision_margin,                
-            ],
-            outputs=[self._collision_costs],
-            device=self.model.device
-        )
-        
     def setup_drone(self):
         """Setup drone parameters and cache computed values. Can be called to reset/randomize parameters."""
         # Calculate and cache max RPM from motor specifications
         self.max_rpm = self.motor_kv * self.nominal_cell_voltage * self.lipo_cells
-        self.max_omega = self.max_rpm * 2.0 * 3.14159 / 60.0  # rad/s
+        self.max_omega = self.max_rpm * 2.0 * 3.14159 / 60.0  # rad/s        
 
     def print_drone_specs(self):
         """Calculate and display drone specifications including thrust-to-weight ratio."""
@@ -1005,74 +922,114 @@ class DroneParcour(WarpEnv):
         )
 
     def render(self, state=None):
-        """Override render to show dynamic target spheres"""
-        self.render_time += self.frame_dt
-        if self.render_time % (1.0 / self.render_fps) < self.frame_dt and self.renderer is not None:
+        """Override render to show dynamic target spheres"""        
+        if self.render_time % (1.0 / self.render_fps) < self.frame_dt:
+            if self.renderer is not None:
+                self.renderer.begin_frame(self.render_time)
+                
+                # Add custom target visualization if targets exist
+                if hasattr(self, 'target_body_q') and self.is_render_targets:
+                    # Draw target coordinate frames for each environment
+                    for i in range(self.num_envs):
+                        target_pos = self.target_body_q[i, :3].cpu().numpy()
+                        target_quat = self.target_body_q[i, 3:7].cpu().numpy()  # [x, y, z, w]
+                                
+                        # Arrow dimensions
+                        base_radius = 0.05
+                        base_height = 0.3
+                        cap_radius = 0.08
+                        cap_height = 0.1
+                        
+                        try:
+                            # stateX-axis arrow (red)
+                            self.renderer.render_arrow(
+                                name=f"target_x_{i}",
+                                pos=tuple(target_pos),
+                                rot=target_quat,
+                                base_radius=base_radius,
+                                base_height=base_height,
+                                cap_radius=cap_radius,
+                                cap_height=cap_height,
+                                up_axis=0,  # X-axis
+                                color=(1.0, 0.0, 0.0),  # Red
+                                visible=True
+                            )
+                            
+                            # Y-axis arrow (green) - points downward in warp coordinate system
+                            self.renderer.render_arrow(
+                                name=f"target_y_{i}",
+                                pos=tuple(target_pos),
+                                rot=target_quat,
+                                base_radius=base_radius,
+                                base_height=base_height,
+                                cap_radius=cap_radius,
+                                cap_height=cap_height,
+                                up_axis=1,  # Y-axis (downward)
+                                color=(0.0, 1.0, 0.0),  # Green
+                                visible=True
+                            )
+                            
+                            # Z-axis arrow (blue)
+                            self.renderer.render_arrow(
+                                name=f"target_z_{i}",
+                                pos=tuple(target_pos),
+                                rot=target_quat,
+                                base_radius=base_radius,
+                                base_height=base_height,
+                                cap_radius=cap_radius,
+                                cap_height=cap_height,
+                                up_axis=2,  # Z-axis
+                                color=(0.0, 0.0, 1.0),  # Blue
+                                visible=True
+                            )
+                        except Exception as e:
+                            # If rendering fails, skip this target
+                            pass
+                
+                # Render the simulation state
+                self.renderer.render(state or self.state_0)
+                self.renderer.end_frame()
 
-            self.renderer.begin_frame(self.render_time)
-            
-            # Add custom target visualization if targets exist
-            if hasattr(self, 'target_body_q') and self.is_render_targets:
-                # Draw target coordinate frames for each environment
-                for i in range(self.num_envs):
-                    target_pos = self.target_body_q[i, :3].cpu().numpy()
-                    target_quat = self.target_body_q[i, 3:7].cpu().numpy()  # [x, y, z, w]
-                              
-                    # Arrow dimensions
-                    base_radius = 0.05
-                    base_height = 0.3
-                    cap_radius = 0.08
-                    cap_height = 0.1
+            if self.debug_pov:
+                # Visualize depth observations with tiled plot
+                import matplotlib.pyplot as plt
+                import numpy as np
+                
+                # Initialize figure and axes once
+                if not hasattr(self, '_debug_fig'):
+                    num_to_show = min(16, self.num_envs)
+                    n_row_col = math.ceil(math.sqrt(num_to_show))
+                    self._debug_fig, self._debug_axes = plt.subplots(n_row_col, n_row_col, figsize=(6, 6))
+                    self._debug_axes = self._debug_axes.flatten()
+                    self._debug_images = []
                     
-                    try:
-                        # stateX-axis arrow (red)
-                        self.renderer.render_arrow(
-                            name=f"target_x_{i}",
-                            pos=tuple(target_pos),
-                            rot=target_quat,
-                            base_radius=base_radius,
-                            base_height=base_height,
-                            cap_radius=cap_radius,
-                            cap_height=cap_height,
-                            up_axis=0,  # X-axis
-                            color=(1.0, 0.0, 0.0),  # Red
-                            visible=True
-                        )
-                        
-                        # Y-axis arrow (green) - points downward in warp coordinate system
-                        self.renderer.render_arrow(
-                            name=f"target_y_{i}",
-                            pos=tuple(target_pos),
-                            rot=target_quat,
-                            base_radius=base_radius,
-                            base_height=base_height,
-                            cap_radius=cap_radius,
-                            cap_height=cap_height,
-                            up_axis=1,  # Y-axis (downward)
-                            color=(0.0, 1.0, 0.0),  # Green
-                            visible=True
-                        )
-                        
-                        # Z-axis arrow (blue)
-                        self.renderer.render_arrow(
-                            name=f"target_z_{i}",
-                            pos=tuple(target_pos),
-                            rot=target_quat,
-                            base_radius=base_radius,
-                            base_height=base_height,
-                            cap_radius=cap_radius,
-                            cap_height=cap_height,
-                            up_axis=2,  # Z-axis
-                            color=(0.0, 0.0, 1.0),  # Blue
-                            visible=True
-                        )
-                    except Exception as e:
-                        # If rendering fails, skip this target
-                        pass
-            
-            # Render the simulation state
-            self.renderer.render(state or self.state_0)
-            self.renderer.end_frame()
+                    # Initialize image objects                    
+                    for i in range(num_to_show):
+                        im = self._debug_axes[i].imshow(np.zeros((self.cam_height, self.cam_width)), 
+                                                       cmap='viridis', vmin=self.cam_min_depth, vmax=self.cam_max_depth)
+                        self._debug_axes[i].set_title(f'Env {i}')
+                        self._debug_axes[i].axis('off')
+                        self._debug_images.append(im)
+                    
+                    # Hide unused subplots
+                    for i in range(num_to_show):
+                        self._debug_axes[i].axis('off')
+                    
+                    plt.tight_layout()
+                    plt.show(block=False)
+                
+                # Update existing figure with new data
+                visual_obs = wp.to_torch(self._cam_depths_wp)
+                depth_images = visual_obs.reshape(self.num_envs, self.cam_height, self.cam_width).detach().cpu().numpy()
+                
+                num_to_show = min(16, self.num_envs)
+                for i in range(num_to_show):
+                    self._debug_images[i].set_data(depth_images[i])
+                
+                self._debug_fig.canvas.draw()
+                self._debug_fig.canvas.flush_events()
+
+        self.render_time += self.frame_dt
 
     def reset_targets(self):
         """Reset target positions to random locations within target bounds"""
@@ -1142,98 +1099,84 @@ class DroneParcour(WarpEnv):
         sigma_initial_ang_vel_tensor = torch.tensor(self.three_sigma_initial_ang_vel, device=self.device) / 3.0
         body_qd[env_ids, :3] = torch.randn_like(body_qd[env_ids, :3]) * sigma_initial_ang_vel_tensor
         
-        self.reset_targets()
+        # self.reset_targets()
+
 
     def pre_physics_step(self, actions):        
         # Clamp actions to [-1, 1] range
         actions = torch.clamp(actions, -1.0, 1.0)        
-        body_force = (actions + 1.0) * 0.5
+        body_force = (actions + 1.0) * 0.5        
         self.applied_body_force = body_force.detach()        # for observations and rewards
-        # body_force = torch.tensor([0.0, 0.0, 0.0, 0.0], device=self.device, requires_grad=True)
         self.control.assign("body_force", body_force)        
     
+    def compute_depth_observations(self, model, state):
+        obs_indices = getattr(self, "_obstacle_shape_indices", None)
+
+        if self.use_depth_observations and obs_indices is not None and int(obs_indices.shape[1]) > 0:        
+            wp.launch(
+                render_depth_kernel,
+                dim=(self.num_envs, self.cam_width * self.cam_height),
+                inputs=[
+                    state.body_q,
+                    self._drone_body_index_wp,
+                    model.shape_transform,
+                    model.shape_geo,
+                    obs_indices,
+                    int(obs_indices.shape[1]),
+                    self._cam_dirs_local_wp,
+                    self._cam_pos_local_wp,                    
+                    float(self.cam_min_depth),
+                    float(self.cam_max_depth),
+                ],
+                outputs=[self._cam_depths_wp],
+                device=model.device,
+            )   
+
+    def compute_collision_distances(self, model, state):
+        """Compute collision costs between drones and obstacles using SDF with graph capture"""
+
+        # Reset collision costs
+        self._collision_distances.zero_()
+
+        wp.launch(
+            collision_distance_kernel,
+            dim=(self.num_envs, len(self.indices_shape_with_collision)),
+            inputs=[
+                state.body_q,  # Detach to remove gradients for Warp kernel
+                self.indices_shape_with_collision,
+                self.sim_view._drone_indices_wp,
+                model.shape_transform,
+                model.shape_geo,  
+                model.shape_body,                                            
+            ],
+            outputs=[self._collision_distances],
+            device=model.device
+        )        
+
+        
+
     def compute_observations(self):
         """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
         # Get drone states using the simulation view
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
-        # position and orientation
-        pos = body_q[:, 0:3]
-        quat = body_q[:, 3:7]
-
-        # up-axis in world (rotate local Y by body orientation)
-        up_local = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1)
-        up_axis = quat_rotate(quat, up_local)
-
-        # linear velocity and body rates
-        lin_vel = body_qd[:, 3:6]
-        ang_vel = body_qd[:, 0:3]
-        # target direction in body frame and distance
-        vec_to_target_world = self.target_body_q[:, :3] - pos
-        # vec_to_target_body = quat_rotate(quat_conjugate(quat), vec_to_target_world)
-        # dir_to_target_body = normalize(vec_to_target_body)
-        dir_to_target_world = vec_to_target_world / torch.norm(vec_to_target_world, dim=1, keepdim=True)
-        dist_to_target = torch.norm(vec_to_target_world, dim=1, keepdim=True)
-
         # last actions
         last_actions = self.applied_body_force # shape (N, 4)
-
-        # ================= Depth rendering =================
-        obs_indices = getattr(self, "_obstacle_shape_indices", None)
-        if obs_indices is not None and int(obs_indices.shape[1]) > 0:
-            wp.launch(
-                render_depth_kernel,
-                dim=(self.num_envs, self.cam_width * self.cam_height),
-                inputs=[
-                    self.state.body_q.detach(),
-                    self._drone_body_index_wp,
-                    self.model.shape_transform,
-                    self.model.shape_geo,
-                    obs_indices,
-                    int(obs_indices.shape[1]),
-                    self._cam_dirs_local_wp,
-                    self._cam_pos_local_wp,
-                    int(self.cam_width),
-                    int(self.cam_height),
-                    float(self.cam_min_depth),
-                    float(self.cam_max_depth),
-                ],
-                outputs=[self._cam_depths_wp],
-                device=self.model.device,
-            )
-            cam_depths_torch = wp.to_torch(self._cam_depths_wp)
-        else:
-            cam_depths_torch = torch.full(
-                (self.num_envs, self.cam_width * self.cam_height),
-                float(self.cam_max_depth),
-                device=self.device,
-                dtype=torch.float32,
-            )
-        # expose reshaped depth for consumers (HxW)
-        self.depth_maps = cam_depths_torch.view(self.num_envs, self.cam_height, self.cam_width)
-
-        # obs_parts = [
-        #     pos,                # 3
-        #     up_axis,            # 3 (world up)
-        #     lin_vel,            # 3
-        #     ang_vel,            # 3
-        #     dir_to_target_world, # 3 (in world frame)
-        #     dist_to_target,     # 1
-        #     last_actions,       # 4
-        # ]
+        # visual_obs = (wp.to_torch(self._cam_depths_wp) - self.cam_min_depth) / (self.cam_max_depth - self.cam_min_depth)
         obs_parts = [
             body_q,
             body_qd,
             self.target_body_q,
             self.target_body_qd,
             last_actions,
+            wp.to_torch(self._cam_depths_wp) # visual observations
         ]
         obs = torch.cat(obs_parts, dim=-1)
 
-        # Pad to configured num_obs if needed
-        if hasattr(self, "num_obs") and obs.shape[-1] < self.num_obs:
-            pad = torch.zeros((self.num_envs, self.num_obs - obs.shape[-1]), device=self.device, dtype=obs.dtype)
-            obs = torch.cat([obs, pad], dim=-1)
+        # data hygiene
+        nan_mask = torch.isnan(obs)
+        obs = torch.where(nan_mask, torch.randn_like(obs) * 0.1, obs)
+        obs = torch.clamp(obs, -1e3, 1e3)       
 
         self.obs_buf = obs
             
@@ -1272,7 +1215,7 @@ class DroneParcour(WarpEnv):
         # ===================== Arena Boundary Barriers =========================
         arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
         arena_maxs = self.arena_bounds[:, 1]  # [x_max, y_max, z_max]
-        start_penalizing_before_arenabounds = 1.0  # meters before hitting the boundary
+        start_penalizing_before_arenabounds = 0.5  # meters before hitting the boundary
         beta_softplus_arenabounds = 2 # the higher the sharper the corner
 
         # how much outside of the arena is the drone?
@@ -1284,27 +1227,37 @@ class DroneParcour(WarpEnv):
 
         # ====================== Angular Speed Barrier =========================
         ang_speed = torch.linalg.norm(body_qd[:, :3], dim=1)
-        max_ang_speed = 100.0  # rad/s
+        max_ang_speed = 30.0  # rad/s
         start_penalizing_before_ratelimit = 10.0
         beta_softplus_ang_speed = 0.5  # the higher the sharper the corner
         how_much_spinning_too_fast = ang_speed - max_ang_speed
         ratelimit_penalty = -torch.nn.functional.softplus(how_much_spinning_too_fast + start_penalizing_before_ratelimit, beta=beta_softplus_ang_speed)
+        
+        # ===================== Collision Barrier =========================        
+        collision_threshold = 0.5  # meters - start penalizing when closer than this
+        beta_softplus_collision = 10.0  # the higher the sharper the corner
+        
+        closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0]
+        how_close_to_collision = collision_threshold - closest_collision_distance
+        collision_penalty = -torch.nn.functional.softplus(how_close_to_collision, beta=beta_softplus_collision)
 
-        # ===================== Collision Cost =========================
-        collision_penalty = - 1.0 * wp.to_torch(self._collision_costs)        
-
-        progress_reward = 0.001 * self.progress_buf
+        progress_reward = 0.01 * self.progress_buf
         
         reward = (
             target_proximity_reward  # goal directedness
-            # + progress_reward        # progress reward  
+            + progress_reward        # progress reward  
             # + action_penalty         # action cost
             + outside_penalty  # arena boundary barriers (differentiable)
-            + ratelimit_penalty  # angular speed barrier (differentiable)
+            # + ratelimit_penalty  # angular speed barrier (differentiable)
             + collision_penalty  # collision avoidance (differentiable SDF-based)
             # + orientation_penalty * target_proximity_reward # penalize orientation error at goal
             # + target_rate_mismatch_penalty * target_proximity_reward # penalize target rate mismatch at goal
         )
+
+        # data hygiene
+        nan_mask = torch.isnan(reward)
+        reward = torch.where(nan_mask, torch.randn_like(reward) * 0.1, reward)
+        reward = torch.clamp(reward, -1e3, 1e3)        
 
         # Truncation/termination (ant-like structure, but with sensible failsafes)
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
@@ -1315,10 +1268,11 @@ class DroneParcour(WarpEnv):
 
         if early_termination:
             # Hard termination only for extreme violations -> if way beyond barrier functions            
-            is_too_fast = how_much_spinning_too_fast > start_penalizing_before_ratelimit*3
-            is_way_outside = how_much_outside > start_penalizing_before_arenabounds*3
+            is_too_fast = how_much_spinning_too_fast > start_penalizing_before_ratelimit
+            is_way_outside = how_much_outside > start_penalizing_before_arenabounds
+            is_colliding = closest_collision_distance < 0.2
 
-            terminated = is_too_fast | is_way_outside
+            terminated = is_too_fast | is_way_outside | is_colliding
             reset = torch.where(terminated, torch.ones_like(reset), reset)
         else:
             terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)

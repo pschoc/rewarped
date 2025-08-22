@@ -174,7 +174,7 @@ class Environment:
     requires_grad: bool = False
     num_envs: int = 8
 
-    ground_plane: bool = False
+    ground_plane: bool = True
     ground_plane_settings = {}
     up_axis: str = "Y"
     gravity: float = -9.81
