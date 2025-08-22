@@ -1,4 +1,4 @@
-# pyright: reportGeneralTypeIssues=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportInvalidTypeForm=false, reportOperatorIssue=false, reportArgumentType=false, reportCallIssue=false
+# pyright: reportGeneralTypeIssues=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false
 import os
 import math
 import torch
@@ -10,127 +10,6 @@ from rewarped.warp.model_monkeypatch import Model_control
 from rewarped.environment import IntegratorType
 from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate
 from warp.sim.collide import box_sdf, capsule_sdf, cone_sdf, cylinder_sdf, mesh_sdf, plane_sdf, sphere_sdf
-
-
-# -------------------- Depth camera kernels (SDF-based ray marching) --------------------
-@wp.func
-def _scene_sdf(
-    env_id: int,
-    x_world: wp.vec3,
-    obstacle_ids: wp.array(dtype=int, ndim=2),
-    num_obs_per_env: int,
-    shape_X_bs: wp.array(dtype=wp.transform),
-    geo: wp.sim.ModelShapeGeometry,
-) -> float:
-    # minimum signed distance to any obstacle (>=0 outside)
-    dmin = 1.0e9
-    for j in range(num_obs_per_env):
-        s_idx = obstacle_ids[env_id, j]
-        if s_idx < 0:
-            continue
-        X_bs = shape_X_bs[s_idx]
-        x_local = wp.transform_point(wp.transform_inverse(X_bs), x_world)
-
-        geo_type = geo.type[s_idx]
-        geo_scale = geo.scale[s_idx]
-
-        d = 1.0e9
-        if geo_type == wp.sim.GEO_SPHERE:
-            d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
-        elif geo_type == wp.sim.GEO_BOX:
-            d = box_sdf(geo_scale, x_local)
-        elif geo_type == wp.sim.GEO_CAPSULE:
-            d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
-        elif geo_type == wp.sim.GEO_CYLINDER:
-            d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
-        elif geo_type == wp.sim.GEO_CONE:
-            d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
-        elif geo_type == wp.sim.GEO_MESH:
-            mesh = geo.source[s_idx]
-            min_scale = wp.min(geo_scale)
-            max_dist = 1.0e3
-            d = mesh_sdf(mesh, wp.cw_div(x_local, geo_scale), max_dist)
-            d *= min_scale
-        elif geo_type == wp.sim.GEO_SDF:
-            volume = geo.source[s_idx]
-            xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
-            nn = wp.vec3(0.0, 0.0, 0.0)
-            d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, nn)
-        elif geo_type == wp.sim.GEO_PLANE:
-            d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
-
-        if d < dmin:
-            dmin = d
-    if dmin > 1.0e8:
-        dmin = 1.0e8
-    return dmin
-
-
-@wp.kernel
-def depth_sphere_trace_kernel(
-    body_q: wp.array(dtype=wp.transform),
-    drone_body_index: wp.array(dtype=int),
-    shape_X_bs: wp.array(dtype=wp.transform),
-    geo: wp.sim.ModelShapeGeometry,
-    obstacle_ids: wp.array(dtype=int, ndim=2),
-    num_obs_per_env: int,
-    width: int,
-    height: int,
-    fov_y: float,
-    near: float,
-    far: float,
-    cam_offset_b: wp.vec3,
-    cam_forward_b: wp.vec3,
-    cam_up_b: wp.vec3,
-    depth_out: wp.array(dtype=float, ndim=2),  # [num_envs, width*height]
-):
-    env_id, pix = wp.tid()
-
-    body_idx = drone_body_index[env_id]
-    tf = body_q[body_idx]
-
-    # camera basis in world
-    f_b = wp.normalize(cam_forward_b)
-    u_b = wp.normalize(cam_up_b)
-    r_b = wp.normalize(wp.cross(f_b, u_b))
-
-    f_w = wp.normalize(wp.transform_vector(tf, f_b))
-    u_w = wp.normalize(wp.transform_vector(tf, u_b))
-    r_w = wp.normalize(wp.transform_vector(tf, r_b))
-
-    origin = wp.transform_point(tf, cam_offset_b)
-
-    x = pix % width
-    y = pix // width
-    aspect = float(width) / float(height)
-
-    sx = 2.0 * float(x) / float(width - 1) - 1.0
-    sy = 2.0 * float(y) / float(height - 1) - 1.0
-
-    half_tan = wp.tan(0.5 * fov_y)
-    dir = wp.normalize(f_w + half_tan * (sx * aspect * r_w + sy * u_w))
-
-    # sphere tracing
-    t = near
-    max_steps = 64
-    eps = 1.0e-3
-
-    for k in range(max_steps):
-        if t > far:
-            break
-        p = origin + dir * t
-        d = _scene_sdf(env_id, p, obstacle_ids, num_obs_per_env, shape_X_bs, geo)
-        if d < eps:
-            break
-        # safety clamp to avoid zero step
-        if d < 1.0e-4:
-            d = 1.0e-4
-        t = t + d
-
-    if t > far:
-        t = far
-
-    depth_out[env_id, pix] = t
 
 
 class SimulationView:
@@ -240,6 +119,7 @@ def define_propeller(
     
     # For typical quadcopter propellers, use reasonable CT and CP values
     # CT ≈ 0.1-0.15, CP ≈ 0.05-0.08 for efficient props
+    # Pitch affects thrust efficiency: higher pitch = higher thrust per RPM
     C_T = 0.15  # thrust coefficient
     C_P = 0.05  # power coefficient
 
@@ -394,19 +274,7 @@ class DroneParcour(WarpEnv):
     def __init__(self, num_envs=16, episode_length=1000, early_termination=True, **kwargs):
         
         # Extract environment parameters before calling super().__init__()
-        device = kwargs.get("device", "cuda:0")
-        # Depth camera config (can be overridden via kwargs)
-        self.depthcam_width = int(kwargs.pop("depthcam_width", 32))
-        self.depthcam_height = int(kwargs.pop("depthcam_height", 24))
-        self.depthcam_fov_y_deg = float(kwargs.pop("depthcam_fov_y_deg", 90.0))
-        self.depthcam_near = float(kwargs.pop("depthcam_near", 0.05))
-        self.depthcam_far = float(kwargs.pop("depthcam_far", 20.0))
-        self.include_depth_in_obs = bool(kwargs.pop("include_depth_in_obs", False))
-        # camera position/orientation relative to drone body (front-mounted)
-        self.depthcam_offset_b = torch.tensor(kwargs.pop("depthcam_offset_b", [0.15, 0.0, 0.0]), device=device, dtype=torch.float32)
-        self.depthcam_forward_b = torch.tensor(kwargs.pop("depthcam_forward_b", [1.0, 0.0, 0.0]), device=device, dtype=torch.float32)
-        self.depthcam_up_b = torch.tensor(kwargs.pop("depthcam_up_b", [0.0, 1.0, 0.0]), device=device, dtype=torch.float32)
-
+        device = kwargs.get("device", "cuda:0")       
         max_episode_length = kwargs.pop("max_episode_length", episode_length)
         early_termination = kwargs.pop("early_termination", early_termination)
         self.render_fps = kwargs.pop("render_fps", 10)  # Frames per second for rendering
@@ -496,10 +364,7 @@ class DroneParcour(WarpEnv):
             use_graph_capture=False,
             **kwargs,
         )
-        
-        # allocate host-side storage for depth maps (torch)
-        self.depth_maps = torch.zeros((self.num_envs, self.depthcam_height, self.depthcam_width), device=self.device, dtype=torch.float32)
-
+       
     def create_modelbuilder(self):
         """Create the model builder with drone-specific settings"""
         builder = super().create_modelbuilder()
@@ -773,20 +638,9 @@ class DroneParcour(WarpEnv):
             num_obstacles=self.num_obstacles_max * 0
         )
 
-        # Allocate Warp buffers for depth camera after model/device are known
-        self._depth_out_wp = wp.zeros(
-            (self.num_envs, self.depthcam_width * self.depthcam_height),
-            dtype=float,
-            device=self.model.device,
-            requires_grad=False,
-        )
-        self._depthcam_offset_b_wp = wp.vec3(float(self.depthcam_offset_b[0]), float(self.depthcam_offset_b[1]), float(self.depthcam_offset_b[2]))  # type: ignore[attr-defined]
-        self._depthcam_forward_b_wp = wp.vec3(float(self.depthcam_forward_b[0]), float(self.depthcam_forward_b[1]), float(self.depthcam_forward_b[2]))  # type: ignore[attr-defined]
-        self._depthcam_up_b_wp = wp.vec3(float(self.depthcam_up_b[0]), float(self.depthcam_up_b[1]), float(self.depthcam_up_b[2]))  # type: ignore[attr-defined]
-        self._depthcam_fov_y = float(self.depthcam_fov_y_deg * math.pi / 180.0)
-
         with torch.no_grad():
             self.start_rotation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+
             # Initialize target positions for each environment
             self.target_body_q = torch.zeros((self.num_envs, 7), device=self.device, dtype=torch.float32)
             self.target_body_qd = torch.zeros((self.num_envs, 6), device=self.device, dtype=torch.float32)
@@ -863,43 +717,7 @@ class DroneParcour(WarpEnv):
             outputs=[self._collision_costs],
             device=self.model.device
         )
-    
-    def compute_depth_maps(self):
-        """Compute per-env depth maps via SDF-based sphere tracing. Result stored in self.depth_maps (torch)."""
-        if self._obstacle_shape_indices is None:
-            # if no obstacles configured, fill with far plane
-            self.depth_maps.fill_(self.depthcam_far)
-            return
-
-        num_obs_per_env = int(self._obstacle_shape_indices.shape[1])
-
-        wp.launch(
-            depth_sphere_trace_kernel,
-            dim=(self.num_envs, self.depthcam_width * self.depthcam_height),
-            inputs=(
-                self.state.body_q.detach(),
-                self.sim_view._drone_indices_wp,
-                self.model.shape_transform,
-                self.model.shape_geo,
-                self._obstacle_shape_indices,
-                num_obs_per_env,
-                int(self.depthcam_width),
-                int(self.depthcam_height),
-                float(self._depthcam_fov_y),
-                float(self.depthcam_near),
-                float(self.depthcam_far),
-                self._depthcam_offset_b_wp,
-                self._depthcam_forward_b_wp,
-                self._depthcam_up_b_wp,
-            ),
-            outputs=(self._depth_out_wp,),
-            device=self.model.device,
-        )
-
-        # copy to torch buffer and reshape
-        d = wp.to_torch(self._depth_out_wp)
-        self.depth_maps = d.view(self.num_envs, self.depthcam_height, self.depthcam_width)
-
+        
     def setup_drone(self):
         """Setup drone parameters and cache computed values. Can be called to reset/randomize parameters."""
         # Calculate and cache max RPM from motor specifications
@@ -1180,12 +998,7 @@ class DroneParcour(WarpEnv):
         self.control.assign("body_force", body_force)        
     
     def compute_observations(self):
-        """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions.
-        Also computes and stores a per-env depth map in self.depth_maps.
-        If include_depth_in_obs is True, the flattened depth map is appended to the vector observation."""
-        # First, compute depth maps (kept separate from vector obs by default)
-        self.compute_depth_maps()
-
+        """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
         # Get drone states using the simulation view
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
@@ -1202,12 +1015,23 @@ class DroneParcour(WarpEnv):
         ang_vel = body_qd[:, 0:3]
         # target direction in body frame and distance
         vec_to_target_world = self.target_body_q[:, :3] - pos
+        # vec_to_target_body = quat_rotate(quat_conjugate(quat), vec_to_target_world)
+        # dir_to_target_body = normalize(vec_to_target_body)
         dir_to_target_world = vec_to_target_world / torch.norm(vec_to_target_world, dim=1, keepdim=True)
         dist_to_target = torch.norm(vec_to_target_world, dim=1, keepdim=True)
 
         # last actions
         last_actions = self.applied_body_force # shape (N, 4)
 
+        # obs_parts = [
+        #     pos,                # 3
+        #     up_axis,            # 3 (world up)
+        #     lin_vel,            # 3
+        #     ang_vel,            # 3
+        #     dir_to_target_world, # 3 (in world frame)
+        #     dist_to_target,     # 1
+        #     last_actions,       # 4
+        # ]
         obs_parts = [
             body_q,
             body_qd,
@@ -1215,10 +1039,6 @@ class DroneParcour(WarpEnv):
             self.target_body_qd,
             last_actions
         ]
-
-        if self.include_depth_in_obs:
-            obs_parts.append(self.depth_maps.view(self.num_envs, -1))
-
         obs = torch.cat(obs_parts, dim=-1)
 
         # Pad to configured num_obs if needed
@@ -1227,7 +1047,7 @@ class DroneParcour(WarpEnv):
             obs = torch.cat([obs, pad], dim=-1)
 
         self.obs_buf = obs
-
+            
     def compute_reward(self):
         # Get drone states using the simulation view
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
