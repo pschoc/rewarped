@@ -211,8 +211,7 @@ def render_depth_kernel(
     drone_body_index: wp.array(dtype=int),
     shape_X_bs: wp.array(dtype=wp.transform),
     geo: wp.sim.ModelShapeGeometry,
-    obstacle_ids: wp.array(dtype=int, ndim=2),
-    num_shapes: int,
+    obstacle_ids: wp.array(dtype=int),    
     cam_dirs_local: wp.array(dtype=wp.vec3),
     cam_pos_local: wp.vec3,        
     min_depth: float,
@@ -249,8 +248,8 @@ def render_depth_kernel(
         d_min = float(1.0e6)
 
         # iterate shapes
-        for s in range(num_shapes):
-            shape_index = obstacle_ids[env_id, s]
+        for s in range(len(obstacle_ids)):
+            shape_index = obstacle_ids[s]
             if shape_index < 0:
                 continue
             d = sdf_shape_distance_world(p, shape_index, shape_X_bs, geo)            
@@ -436,7 +435,9 @@ class DroneParcour(WarpEnv):
         )
         
         # Simple observation like ant: position + velocity + target + actions = 16
-        num_obs = 30 + self.cam_width * self.cam_height 
+        num_obs = 31 
+        if self.use_depth_observations:
+            num_obs += self.cam_width * self.cam_height
         num_act = 4  # Four thrust controls
 
         # collision group indices
@@ -527,8 +528,8 @@ class DroneParcour(WarpEnv):
         # )
         
         # ================ Add maze walls ================        
-        maze_wall_length_min = 1.0
-        maze_wall_length_max = 6.0        
+        maze_wall_length_min = self.obstacle_min_size
+        maze_wall_length_max = self.obstacle_max_size       
         
         # Create maze walls with random positions and orientations
         for i in range(self.num_static_obstacles):
@@ -606,14 +607,14 @@ class DroneParcour(WarpEnv):
         arm_length = self.arm_specs[2] / 2
         print(f"arm_length: {arm_length}")
 
-        # collision box prevents rolling over behavior in the beginning of training
+        # collision box
         builder.add_shape_box(
             body,
             pos=(0.0, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0),
-            hx=arm_length*1.3, # padded span
-            hy=self.body_dimensions[2]/2,  # height/2
-            hz=arm_length*1.3, # padded span
+            hx=arm_length*1.3,
+            hy=self.body_dimensions[2]/2,
+            hz=arm_length*1.3,
             density=0.0,
             is_visible=False,
             has_shape_collision=True,
@@ -727,7 +728,7 @@ class DroneParcour(WarpEnv):
             # Initialize target positions for each environment
             self.target_body_q = torch.zeros((self.num_envs, 7), device=self.device, dtype=torch.float32)
             self.target_body_qd = torch.zeros((self.num_envs, 6), device=self.device, dtype=torch.float32)
-            self.reset_targets()
+            self.reset_targets(torch.arange(self.num_envs, device=self.device))
 
         # Provide an external-forces callback via the model so newly-created
         # Control objects inherit it each step.
@@ -1031,33 +1032,62 @@ class DroneParcour(WarpEnv):
 
         self.render_time += self.frame_dt
 
-    def reset_targets(self):
+    def reset_targets(self, env_ids):
         """Reset target positions to random locations within target bounds"""
         with torch.no_grad():            
             # Generate random positions within scaled target bounds
-            random_factors = torch.rand([self.num_envs, 3], device=self.device)
+            random_factors = torch.rand([len(env_ids), 3], device=self.device)
             mins = self.target_bounds[:, 0]  # [x_min, y_min, z_min]
             maxs = self.target_bounds[:, 1]  # [x_max, y_max, z_max]
             ranges = maxs - mins        # [x_range, y_range, z_range]
             
             # generate random target attitudes            
-            randomized_target_orientation = self.target_attitude_euler_deg.repeat(self.num_envs, 1) / 180.0 * math.pi
+            randomized_target_orientation = self.target_attitude_euler_deg.repeat(len(env_ids), 1) / 180.0 * math.pi
             randomized_target_orientation += torch.randn_like(randomized_target_orientation) * self.three_sigma_target_attitude_deg / 3.0 / 180.0 * math.pi
 
             # Create quaternions for each rotation axis
-            quat_roll = quat_from_angle_axis(randomized_target_orientation[:, 0], torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1))
-            quat_pitch = quat_from_angle_axis(randomized_target_orientation[:, 1] , torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
-            quat_yaw = quat_from_angle_axis(randomized_target_orientation[:, 2], torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1))
+            quat_roll = quat_from_angle_axis(randomized_target_orientation[:, 0], torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(len(env_ids), -1))
+            quat_pitch = quat_from_angle_axis(randomized_target_orientation[:, 1] , torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(len(env_ids), -1))
+            quat_yaw = quat_from_angle_axis(randomized_target_orientation[:, 2], torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1))
             
             # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
             target_attitudes = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
             
-            self.target_body_q[:, 0:3] = mins + random_factors * ranges
-            self.target_body_q[:, 3:7] = target_attitudes # Set target orientations as quaternions
-            
+            self.target_body_q[env_ids, 0:3] = mins + random_factors * ranges
+            self.target_body_q[env_ids, 3:7] = target_attitudes
+
             # Set target velocities
-            self.target_body_qd[:, 3:6] = self.target_lin_vel.repeat(self.num_envs, 1) + torch.randn_like(self.target_lin_vel) * self.three_sigma_target_lin_vel / 3.0
-            self.target_body_qd[:, :3] = self.target_ang_vel.repeat(self.num_envs, 1) + torch.randn_like(self.target_ang_vel) * self.three_sigma_target_ang_vel / 3.0
+            self.target_body_qd[env_ids, 3:6] = self.target_lin_vel.repeat(len(env_ids), 1) + torch.randn_like(self.target_lin_vel) * self.three_sigma_target_lin_vel / 3.0
+            self.target_body_qd[env_ids, :3] = self.target_ang_vel.repeat(len(env_ids), 1) + torch.randn_like(self.target_ang_vel) * self.three_sigma_target_ang_vel / 3.0
+
+    def reset_static_obstacles(self):
+        with torch.no_grad():
+            # Find obstacle shape indices (shapes that are not drone bodies)
+            all_shapes = self.indices_shape_with_collision.numpy()
+            drone_shapes = self.sim_view._drone_indices_wp.numpy()
+            obstacle_mask = ~np.isin(all_shapes, drone_shapes)
+            obstacle_indices = all_shapes[obstacle_mask]
+            N_obs = len(obstacle_indices)
+            
+            # Generate random positions within scaled room bounds
+            random_factors = torch.rand(N_obs, 3, device=self.device)
+            mins = self.room_bounds[:, 0]  # [x_min, y_min, z_min]
+            maxs = self.room_bounds[:, 1]  # [x_max, y_max, z_max]
+            ranges = maxs - mins        # [x_range, y_range, z_range]
+
+            # generate random target attitudes            
+            randomized_orientation = torch.randn(N_obs, device=self.device) * math.pi
+
+            # Create quaternions for each rotation axis
+            quat_azimuth = quat_from_angle_axis(randomized_orientation, torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(N_obs, -1))
+            
+            cache_poses = wp.to_torch(self.model.shape_transform)
+
+            for i, s in enumerate(obstacle_indices):
+                cache_poses[s, :3] = (mins + ranges * random_factors[i])*0.0
+                cache_poses[s, 3:7] = quat_azimuth[i]
+                        
+            self.model.shape_transform = wp.from_torch(cache_poses, dtype=wp.transform)
 
     @torch.no_grad()
     def randomize_init(self, env_ids):        
@@ -1099,7 +1129,7 @@ class DroneParcour(WarpEnv):
         sigma_initial_ang_vel_tensor = torch.tensor(self.three_sigma_initial_ang_vel, device=self.device) / 3.0
         body_qd[env_ids, :3] = torch.randn_like(body_qd[env_ids, :3]) * sigma_initial_ang_vel_tensor
         
-        # self.reset_targets()
+        self.reset_targets(env_ids)
 
 
     def pre_physics_step(self, actions):        
@@ -1110,9 +1140,10 @@ class DroneParcour(WarpEnv):
         self.control.assign("body_force", body_force)        
     
     def compute_depth_observations(self, model, state):
-        obs_indices = getattr(self, "_obstacle_shape_indices", None)
-
-        if self.use_depth_observations and obs_indices is not None and int(obs_indices.shape[1]) > 0:        
+        if not self.use_depth_observations:
+            return
+            
+        if self.use_depth_observations and len(self.indices_shape_with_collision) > 0:        
             wp.launch(
                 render_depth_kernel,
                 dim=(self.num_envs, self.cam_width * self.cam_height),
@@ -1121,8 +1152,7 @@ class DroneParcour(WarpEnv):
                     self._drone_body_index_wp,
                     model.shape_transform,
                     model.shape_geo,
-                    obs_indices,
-                    int(obs_indices.shape[1]),
+                    self.indices_shape_with_collision,                    
                     self._cam_dirs_local_wp,
                     self._cam_pos_local_wp,                    
                     float(self.cam_min_depth),
@@ -1134,6 +1164,8 @@ class DroneParcour(WarpEnv):
 
     def compute_collision_distances(self, model, state):
         """Compute collision costs between drones and obstacles using SDF with graph capture"""
+        if not self.use_collision_distances:
+            return
 
         # Reset collision costs
         self._collision_distances.zero_()
@@ -1151,9 +1183,7 @@ class DroneParcour(WarpEnv):
             ],
             outputs=[self._collision_distances],
             device=model.device
-        )        
-
-        
+        )                
 
     def compute_observations(self):
         """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
@@ -1162,21 +1192,27 @@ class DroneParcour(WarpEnv):
 
         # last actions
         last_actions = self.applied_body_force # shape (N, 4)
-        # visual_obs = (wp.to_torch(self._cam_depths_wp) - self.cam_min_depth) / (self.cam_max_depth - self.cam_min_depth)
+        closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0]
         obs_parts = [
             body_q,
             body_qd,
             self.target_body_q,
             self.target_body_qd,
             last_actions,
-            wp.to_torch(self._cam_depths_wp) # visual observations
+            closest_collision_distance.unsqueeze(1)
         ]
+        
+        if self.use_depth_observations:
+            # visual_obs = (wp.to_torch(self._cam_depths_wp) - self.cam_min_depth) / (self.cam_max_depth - self.cam_min_depth)
+            visual_obs = wp.to_torch(self._cam_depths_wp)
+            obs_parts.append(visual_obs)
+            
         obs = torch.cat(obs_parts, dim=-1)
 
         # data hygiene
         nan_mask = torch.isnan(obs)
         obs = torch.where(nan_mask, torch.randn_like(obs) * 0.1, obs)
-        obs = torch.clamp(obs, -1e3, 1e3)       
+        # obs = torch.clamp(obs, -2e1, 2e1)       
 
         self.obs_buf = obs
             
@@ -1187,7 +1223,7 @@ class DroneParcour(WarpEnv):
         pos = body_q[:,0:3]
 
         # target state mismatch      
-        pos_err_norm = torch.sum((self.target_body_q[:, 0:3] - body_q[:, 0:3])**2, dim=1)
+        pos_err_norm = torch.norm(self.target_body_q[:, :3] - body_q[:, :3], dim=1)
         vel_err_norm = torch.norm(self.target_body_qd[:, 3:6] - body_qd[:, 3:6], dim=1)
         ang_vel_err = torch.norm(self.target_body_qd[:, :3] - body_qd[:, :3], dim=1)
 
@@ -1205,18 +1241,21 @@ class DroneParcour(WarpEnv):
         ori_err_vec = ori_err_axis * ori_err_angle                            # (N,3)
 
         # target proximity reward
-        target_proximity_reward = 10.0 / (1.0 + pos_err_norm) 
+        # target_proximity_reward = 2.0 * torch.exp(-1.0 * pos_err_norm)
+        target_proximity_reward = 1.0 / (1.0 + pos_err_norm)
 
         orientation_penalty = -1.0* torch.norm(ori_err_vec, dim=-1)
-        target_rate_mismatch_penalty = -1.0*vel_err_norm - 1.0*ang_vel_err
 
-        action_penalty = -0.01 * torch.sum(self.applied_body_force**2, dim=-1)
+        distance_gate = torch.exp(-0.5 * pos_err_norm)
+        target_rate_mismatch_bonus = distance_gate * (torch.exp(-1.0 * vel_err_norm) + torch.exp(-1.0 * ang_vel_err))
+
+        action_penalty = -0.001 * torch.norm(self.applied_body_force, dim=-1)
 
         # ===================== Arena Boundary Barriers =========================
         arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
         arena_maxs = self.arena_bounds[:, 1]  # [x_max, y_max, z_max]
         start_penalizing_before_arenabounds = 0.5  # meters before hitting the boundary
-        beta_softplus_arenabounds = 2 # the higher the sharper the corner
+        beta_softplus_arenabounds = 0.5 # the higher the sharper the corner
 
         # how much outside of the arena is the drone?
         dist_to_min = arena_mins - pos
@@ -1231,33 +1270,36 @@ class DroneParcour(WarpEnv):
         start_penalizing_before_ratelimit = 10.0
         beta_softplus_ang_speed = 0.5  # the higher the sharper the corner
         how_much_spinning_too_fast = ang_speed - max_ang_speed
-        ratelimit_penalty = -torch.nn.functional.softplus(how_much_spinning_too_fast + start_penalizing_before_ratelimit, beta=beta_softplus_ang_speed)
+        ratelimit_penalty = -0.01*torch.nn.functional.softplus(how_much_spinning_too_fast + start_penalizing_before_ratelimit, beta=beta_softplus_ang_speed)
         
         # ===================== Collision Barrier =========================        
-        collision_threshold = 0.5  # meters - start penalizing when closer than this
-        beta_softplus_collision = 10.0  # the higher the sharper the corner
+        collision_threshold = 0.2  # meters - start penalizing when closer than this
+        beta_collision = 10.0  # the higher the sharper the corner
         
-        closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0]
-        how_close_to_collision = collision_threshold - closest_collision_distance
-        collision_penalty = -torch.nn.functional.softplus(how_close_to_collision, beta=beta_softplus_collision)
+        if self.use_collision_distances:
+            closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0]
+            how_close_to_collision = closest_collision_distance - collision_threshold
+            collision_penalty = -0.01 * torch.exp(- beta_collision * torch.tensor(how_close_to_collision))
+        else:
+            collision_penalty = 0.0
 
         progress_reward = 0.01 * self.progress_buf
         
         reward = (
-            target_proximity_reward  # goal directedness
-            + progress_reward        # progress reward  
+            # target_proximity_reward  # goal directedness
+            + progress_reward        # progress reward              
             # + action_penalty         # action cost
             + outside_penalty  # arena boundary barriers (differentiable)
             # + ratelimit_penalty  # angular speed barrier (differentiable)
-            + collision_penalty  # collision avoidance (differentiable SDF-based)
+            # + collision_penalty  # collision avoidance (differentiable SDF-based)
             # + orientation_penalty * target_proximity_reward # penalize orientation error at goal
-            # + target_rate_mismatch_penalty * target_proximity_reward # penalize target rate mismatch at goal
+            # + target_rate_mismatch_bonus # penalize target rate mismatch at goal
         )
 
         # data hygiene
         nan_mask = torch.isnan(reward)
         reward = torch.where(nan_mask, torch.randn_like(reward) * 0.1, reward)
-        reward = torch.clamp(reward, -1e3, 1e3)        
+        # reward = torch.clamp(reward, -1e3, 1e3)        
 
         # Truncation/termination (ant-like structure, but with sensible failsafes)
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
@@ -1270,10 +1312,15 @@ class DroneParcour(WarpEnv):
             # Hard termination only for extreme violations -> if way beyond barrier functions            
             is_too_fast = how_much_spinning_too_fast > start_penalizing_before_ratelimit
             is_way_outside = how_much_outside > start_penalizing_before_arenabounds
-            is_colliding = closest_collision_distance < 0.2
+            if self.use_collision_distances:
+                is_colliding = closest_collision_distance < collision_threshold
+            else:
+                is_colliding = torch.zeros_like(is_too_fast)
 
             terminated = is_too_fast | is_way_outside | is_colliding
             reset = torch.where(terminated, torch.ones_like(reset), reset)
+
+            # reward[terminated] -= 10.0 # termination penalty            
         else:
             terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
 
