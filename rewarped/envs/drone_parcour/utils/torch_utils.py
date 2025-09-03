@@ -130,3 +130,110 @@ def tf_combine(q1, t1, q2, t2):
 @torch.jit.script
 def get_basis_vector(q, v):
     return quat_rotate(q, v)
+
+
+def euler_to_rotation_matrix(roll, pitch, yaw, order: str = 'zyx'):
+    """
+    Convert Euler angles to rotation matrix.
+    
+    Args:
+        roll: Rotation around x-axis (in radians)
+        pitch: Rotation around y-axis (in radians)  
+        yaw: Rotation around z-axis (in radians)
+        order: Rotation order, default 'zyx' (z->y->x)
+    
+    Returns:
+        3x3 rotation matrix
+    """
+    # Convert to tensors if needed
+    if not isinstance(roll, torch.Tensor):
+        roll = torch.tensor(roll, dtype=torch.float32)
+    if not isinstance(pitch, torch.Tensor):
+        pitch = torch.tensor(pitch, dtype=torch.float32)
+    if not isinstance(yaw, torch.Tensor):
+        yaw = torch.tensor(yaw, dtype=torch.float32)
+    
+    cos_roll = torch.cos(roll)
+    sin_roll = torch.sin(roll)
+    cos_pitch = torch.cos(pitch)
+    sin_pitch = torch.sin(pitch)
+    cos_yaw = torch.cos(yaw)
+    sin_yaw = torch.sin(yaw)
+    
+    if order == 'zyx':
+        # Z-Y-X rotation order (yaw->pitch->roll)
+        R11 = cos_yaw * cos_pitch
+        R12 = cos_yaw * sin_pitch * sin_roll - sin_yaw * cos_roll
+        R13 = cos_yaw * sin_pitch * cos_roll + sin_yaw * sin_roll
+        
+        R21 = sin_yaw * cos_pitch
+        R22 = sin_yaw * sin_pitch * sin_roll + cos_yaw * cos_roll
+        R23 = sin_yaw * sin_pitch * cos_roll - cos_yaw * sin_roll
+        
+        R31 = -sin_pitch
+        R32 = cos_pitch * sin_roll
+        R33 = cos_pitch * cos_roll
+        
+    else:
+        raise ValueError(f"Rotation order '{order}' not implemented")
+    
+    # Stack into rotation matrix
+    row1 = torch.stack([R11, R12, R13], dim=-1)
+    row2 = torch.stack([R21, R22, R23], dim=-1)
+    row3 = torch.stack([R31, R32, R33], dim=-1)
+    
+    return torch.stack([row1, row2, row3], dim=-2)
+
+
+@torch.jit.script
+def quat_from_euler_ypr(yaw, pitch, roll):
+    """Convert yaw, pitch, roll to quaternion [x, y, z, w]"""
+    cy = torch.cos(yaw * 0.5)
+    sy = torch.sin(yaw * 0.5) 
+    cp = torch.cos(pitch * 0.5)
+    sp = torch.sin(pitch * 0.5)
+    cr = torch.cos(roll * 0.5)
+    sr = torch.sin(roll * 0.5)
+    
+    x = sr * cp * cy - cr * sp * sy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    w = cr * cp * cy + sr * sp * sy
+    
+    return torch.stack([x, y, z, w], dim=-1)
+
+
+@torch.jit.script
+def quat_to_yaw(q):
+    """Extract yaw angle from quaternion [x, y, z, w]"""
+    x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+@torch.jit.script
+def quat_error_to_axis_angle(q_error):
+    """Convert quaternion error to axis-angle representation for control"""
+    # Ensure we take the shortest path (positive w)
+    w = q_error[:, 3]
+    xyz = q_error[:, :3]
+    
+    # Flip quaternion if w < 0 to ensure shortest path
+    flip = (w < 0).float()
+    w = torch.abs(w)
+    xyz = xyz * (1 - 2 * flip.unsqueeze(-1))
+    
+    # For small angles, use linear approximation: axis*angle ≈ 2*xyz
+    small_angle = w > 0.9999  # cos(angle/2) > cos(0.01) 
+    
+    # Small angle case
+    axis_angle_small = 2.0 * xyz
+    
+    # Regular case: axis*angle = 2*atan2(|xyz|, w) * xyz/|xyz|
+    xyz_norm = torch.norm(xyz, dim=-1, keepdim=True)
+    safe_norm = torch.clamp(xyz_norm, min=1e-8)
+    angle = 2.0 * torch.atan2(xyz_norm.squeeze(-1), w)
+    axis_angle_regular = (xyz / safe_norm) * angle.unsqueeze(-1)
+    
+    return torch.where(small_angle.unsqueeze(-1), axis_angle_small, axis_angle_regular)
+
+    

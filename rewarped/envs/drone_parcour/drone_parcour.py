@@ -5,13 +5,15 @@ import torch
 import warp as wp
 import warp.sim  # ensure wp.sim types are loaded
 import numpy as np
+from gym import spaces
 
 from rewarped.warp_env import WarpEnv
 from rewarped.warp.model_monkeypatch import Model_control
 from rewarped.environment import IntegratorType
-from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate
+from .utils.torch_utils import normalize, quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate, euler_to_rotation_matrix, quat_from_euler_ypr, quat_to_yaw, quat_error_to_axis_angle
 from warp.sim.collide import box_sdf, capsule_sdf, cone_sdf, cylinder_sdf, mesh_sdf, plane_sdf, sphere_sdf
 
+import random
 
 class SimulationView:
     """View class to access drone and obstacle bodies from the full simulation state"""
@@ -28,7 +30,7 @@ class SimulationView:
         
         # Create warp arrays for efficient GPU access
         self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if num_mobile_obstacles > 0 else None
-        self._drone_indices_wp = wp.array(self.drone_indices, dtype=int, device=self.device)
+        self._drone_indices_wp = wp.array(self.drone_indices, dtype=int, device=self.device)        
         
     def get_drone_positions(self, state):
         """Get drone positions from full state"""
@@ -51,6 +53,11 @@ class SimulationView:
         body_q = state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
         body_qd = state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
         return body_q, body_qd
+    
+    def get_drone_force(self, state):
+        """Get full drone body_q and body_qd"""
+        body_f = state.body_f[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
+        return body_f
     
     def set_drone_positions(self, state, positions):
         """Set drone positions in full state"""
@@ -84,8 +91,7 @@ class SimulationView:
 class Propeller:
     """Physics-based propeller model using thrust and drag coefficients"""
     def __init__(self):
-        self.body = 0
-        self.pos = (0.0, 0.0, 0.0)
+        self.body = 0        
         self.dir = (0.0, 1.0, 0.0)
         self.diameter = 0.0
         self.k_f = 0.0  # thrust coefficient
@@ -95,12 +101,8 @@ class Propeller:
 
 
 def define_propeller(
-    drone: int,
-    pos: tuple,
+    drone: int,    
     diameter: float = 0.2286,  # diameter in meters
-    pitch: float = 0.1016,     # pitch in meters (4 inches)
-    thickness: float = 0.01,   # thickness in meters
-    density: float = 1600.0,   # carbon fiber density kg/m³
     turning_direction: float = 1.0,
 ):
     """
@@ -130,8 +132,7 @@ def define_propeller(
     k_d = C_Q * rho * (diameter ** 5) / (4.0 * 3.14159**2)
    
     prop = Propeller()
-    prop.body = drone
-    prop.pos = (pos[0], pos[1], pos[2])
+    prop.body = drone    
     prop.dir = (0.0, 1.0, 0.0)
     prop.diameter = diameter
     prop.k_f = k_f
@@ -276,66 +277,70 @@ def apply_drone_forces_kernel(
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_f: wp.array(dtype=wp.spatial_vector),
     drone_body_index: wp.array(dtype=int),
-    body_force: wp.array(dtype=float, ndim=2),  # shape [num_envs, 4] # type: ignore
-    prop_positions: wp.array(dtype=wp.vec3),  # shape [4]
-    prop_dir_local: wp.vec3,  # (0,1,0)
-    k_f: wp.array(dtype=float),  # shape [4] - thrust coefficients
-    k_d: wp.array(dtype=float),  # shape [4] - drag coefficients
-    turning_dir: wp.array(dtype=float),  # shape [4]    
-    max_rpm: float,  # maximum RPM from motor specs
+    drone_force_torque_mapping: wp.array(dtype=float, ndim=2),  # shape [6, 6]
+    body_force: wp.array(dtype=float, ndim=2),  # shape [num_envs, 6]
+    max_rpm: float,
 ):
     env_id = wp.tid()
     body_idx = drone_body_index[env_id]
 
     tf = body_q[body_idx]
     
-    total_force = wp.vec3(0.0, 0.0, 0.0)
-    total_torque = wp.vec3(0.0, 0.0, 0.0)
+    rpm_scale = max_rpm * 2.0 * 3.14159 / 60.0
 
-    # accumulate force/torque from 4 propellers
-    for i in range(4):
-        # user_act is normalized [0,1], scale to actual RPM
-        # user_act = 1.0 corresponds to max_rpm
-        u = body_force[env_id, i]
-        actual_rpm = u * max_rpm
-        
-        # Convert RPM to angular velocity (rad/s)
-        omega = actual_rpm * 2.0 * 3.14159 / 60.0
-        omega_squared = omega * omega
-        
-        # Thrust: T = k_f * omega²
-        thrust_magnitude = k_f[i] * omega_squared
-        
-        # Drag torque: Q = k_d * omega²  
-        drag_torque_magnitude = k_d[i] * omega_squared
-        
-        prop_spin_axis_world = wp.transform_vector(tf, prop_dir_local)
-        moment_arm = wp.transform_point(tf, prop_positions[i]) - wp.transform_point(tf, body_com[body_idx])
+    # simple drag coefficients
+    cd_linear = 0.001
+    cd_angular = 0.001
+    
+    force_x = 0.0
+    force_y = 0.0  
+    force_z = 0.0
+    torque_x = 0.0
+    torque_y = 0.0
+    torque_z = 0.0
+    
+    # calculate propulsive forces
+    for j in range(6):  # 6 motors
+        rpm_cmd = body_force[env_id, j]              
+        squared_omega = (rpm_cmd * rpm_scale) * (rpm_cmd * rpm_scale)        
 
-        # Apply thrust force in world frame        
-        f_i = prop_spin_axis_world * thrust_magnitude
+        if rpm_cmd < 0.0:  
+            squared_omega *= -1.0
 
-        # Torque from thrust force (moment arm)        
-        t_i = wp.cross(moment_arm, f_i)
+        # Matrix multiplication: result[i] = sum(mapping[i,j] * squared_omega[j])
+        force_x += drone_force_torque_mapping[0, j] * squared_omega
+        force_y += drone_force_torque_mapping[1, j] * squared_omega
+        force_z += drone_force_torque_mapping[2, j] * squared_omega
+        torque_x += drone_force_torque_mapping[3, j] * squared_omega
+        torque_y += drone_force_torque_mapping[4, j] * squared_omega
+        torque_z += drone_force_torque_mapping[5, j] * squared_omega
+    
+    force_body_prop = wp.vec3(force_x, force_y, force_z)    
+    torque_body_prop = wp.vec3(torque_x, torque_y, torque_z)        
+    force_world_prop = wp.transform_vector(tf, force_body_prop)    
+    # torque_world_prop = wp.transform_vector(tf, torque_body_prop)    
+    torque_world_prop = torque_body_prop
+    # aerodynamic forces
+    body_qd_val = body_qd[body_idx]
+    drag_force_x = -cd_linear * body_qd_val[3] * abs(body_qd_val[3])
+    drag_force_y = -cd_linear * body_qd_val[4] * abs(body_qd_val[4])
+    drag_force_z = -cd_linear * body_qd_val[5] * abs(body_qd_val[5])
+    drag_torque_x = -cd_angular * body_qd_val[0] * abs(body_qd_val[0])
+    drag_torque_y = -cd_angular * body_qd_val[1] * abs(body_qd_val[1])
+    drag_torque_z = -cd_angular * body_qd_val[2] * abs(body_qd_val[2])
 
-        # Drag torque: Q = k_d * omega² (opposes propeller rotation)
-        # This creates a reaction torque on the drone body
-        drag_torque = prop_spin_axis_world * drag_torque_magnitude * turning_dir[i]
-
-        total_force += f_i
-        total_torque += t_i - drag_torque
-   
-    total_torque *= 0.7 # dampening
-
+    # add to body forces
     sf = body_f[body_idx]
-    body_f[body_idx] = wp.spatial_vector(  # type: ignore[attr-defined]
-        sf[0] + total_torque[0],
-        sf[1] + total_torque[1],
-        sf[2] + total_torque[2],
-        sf[3] + total_force[0],
-        sf[4] + total_force[1],
-        sf[5] + total_force[2],
+    updated_forces_torques_world = wp.spatial_vector(
+        sf[0] + torque_world_prop[0] + drag_torque_x,
+        sf[1] + torque_world_prop[1] + drag_torque_y,
+        sf[2] + torque_world_prop[2] + drag_torque_z,
+        sf[3] + force_world_prop[0] + drag_force_x,
+        sf[4] + force_world_prop[1] + drag_force_y,
+        sf[5] + force_world_prop[2] + drag_force_z,
     )
+    
+    body_f[body_idx] = updated_forces_torques_world
 
 class DroneParcour(WarpEnv):
     sim_name = "DroneParcour"    
@@ -344,6 +349,9 @@ class DroneParcour(WarpEnv):
     control_tensors_names = ("body_force",)
 
     def __init__(self, num_envs=16, episode_length=1000, early_termination=True, **kwargs):
+
+        # warp to body transformation (going from a stupid y up to a proper z down coordinate system)        
+        self.quat_BBtilde = wp.quat_rpy(math.pi/2, 0.0, 0.0)
         
         # Extract environment parameters before calling super().__init__()
         device = kwargs.get("device", "cuda:0")       
@@ -357,6 +365,11 @@ class DroneParcour(WarpEnv):
         self.use_collision_distances = kwargs.pop("use_collision_distances", False)
         self.debug_pov = kwargs.pop("debug_pov", False)
         self.ground_plane = kwargs.pop("ground_plane", True)
+        self.has_static_obstacles = kwargs.pop("has_static_obstacles", False)
+
+        self.gravity = kwargs.pop("gravity", -9.81)  # m/s²
+        self.max_target_lin_vel = kwargs.pop("max_target_lin_vel", 1.0)  # m/s
+        self.max_target_ang_vel = kwargs.pop("max_target_ang_vel", 1.0)  # rad/s
 
         # Define bounds: [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
         self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds", [[-2.0, 2.0], [1.0, 3.0], [-2.0, 2.0]]), device=device)
@@ -398,18 +411,19 @@ class DroneParcour(WarpEnv):
         
         # motor specs
         self.motor_specs = kwargs.pop("motor_specs", [0.07, 0.02, 0.095])  # [diameter, thickness, weight in kg]
-        
+        self.tilt_angle_deg = kwargs.pop("tilt_angle_deg", 20.0)        
+
         # Propeller specifications (now in inches)
         self.prop_diameter_inch = kwargs.pop("prop_diameter_inch", 12)    # 12 inch diameter
         self.prop_pitch_inch = kwargs.pop("prop_pitch_inch", 4)          # 4 inch pitch
-        self.prop_thickness = kwargs.pop("prop_thickness", 0.003)        # 3mm thick
+        self.prop_thickness = kwargs.pop("prop_thickness", 0.003)        # 3mm thick 
+        self.prop_weight = kwargs.pop("prop_weight", 0.030)            # 30g per propeller       
         
         # Battery and motor specifications
         self.lipo_cells = kwargs.pop("lipo_cells", 6)                    # 6S battery
         self.motor_kv = kwargs.pop("motor_kv", 170)                      # 170 KV
         self.nominal_cell_voltage = kwargs.pop("nominal_cell_voltage", 3.7)  # 3.7V per cell
-        self.action_penalty = kwargs.pop("action_penalty", 0.01)
-        
+      
         # Evaluation parameters (used by agent, not environment)
         self.num_eval_episodes = kwargs.pop("num_eval_episodes", 10)  # Remove from kwargs but don't need to store
         
@@ -435,29 +449,48 @@ class DroneParcour(WarpEnv):
         )
         
         # Simple observation like ant: position + velocity + target + actions = 16
-        num_obs = 31 
         if self.use_depth_observations:
-            num_obs += self.cam_width * self.cam_height
-        num_act = 4  # Four thrust controls
+            num_obs = {
+                'obs': 13,
+                'obs_depth':  (self.cam_width, self.cam_height) if self.use_depth_observations else None
+            }            
+        else:
+            num_obs = {
+                'obs': 13,                
+            }  
+            
+        self.obs_space = self.create_obs_space(num_obs)
+
+        num_act_policy = 4
+        self.num_act_controller = 6  # motor RPM commands
 
         # collision group indices
         self.collision_group_index_obstacles = -1  # -1 means collide with everything
         self.collision_group_index_agent = -1      # -1 means collide with everything
   
-        self.applied_body_force = torch.zeros((num_envs, 4), device=device, requires_grad=True)        
+        self.last_actor_cmd = torch.zeros((num_envs, self.num_act_controller), device=device, requires_grad=True)
+        self.last_power_draw = torch.zeros(num_envs, device=device, requires_grad=True)
         
+        # initialize imu readings
+        self.imu_accel_bias_std = kwargs.pop("imu_accel_bias_std", 0.01)
+        self.imu_gyro_bias_std = kwargs.pop("imu_gyro_bias_std", 0.02)
+        self.imu_accel_bias = torch.randn((num_envs, 3), device=device) * self.imu_accel_bias_std
+        self.imu_gyro_bias = torch.randn((num_envs, 3), device=device) * self.imu_gyro_bias_std
+        self.imu_accel_noise_std = kwargs.pop("imu_accel_noise_std", 0.03)
+        self.imu_gyro_noise_std = kwargs.pop("imu_gyro_noise_std", 0.02)        
+
         # Now call super with only the parameters it expects
         super().__init__(
             num_envs=num_envs,
             num_obs=num_obs,
-            num_act=num_act,
+            num_act=num_act_policy,
             episode_length=max_episode_length,
             early_termination=early_termination,
             render=render,
             render_mode=render_mode,
             use_graph_capture=True,
             **kwargs,
-        )
+        )        
        
     def create_modelbuilder(self):
         """Create the model builder with drone-specific settings"""
@@ -468,6 +501,8 @@ class DroneParcour(WarpEnv):
 
     def add_static_shared_obstacles(self, builder):
         """Add static obstacles including arena walls and maze-like structures"""
+        if not self.has_static_obstacles:
+            return
         
         # Get arena bounds
         x_min, x_max = self.room_bounds[0, 0].item(), self.room_bounds[0, 1].item()
@@ -478,99 +513,344 @@ class DroneParcour(WarpEnv):
         wall_height = y_max - y_min
         ground_altiude = 0.0
 
-        # # Add 4 perimeter walls
-        # # North wall (positive Z)
-        # builder.add_shape_box(
-        #     -1,
-        #     pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
-        #     hx=(x_max - x_min)/2,
-        #     hy=wall_height/2,
-        #     hz=wall_thickness/2,
-        #     is_solid=True,
-        #     has_shape_collision=True,            
-        #     is_visible=True,
-        # )
+        # Add 4 perimeter walls
+        # North wall (positive Z)
+        builder.add_shape_box(
+            -1,
+            pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
+            hx=(x_max - x_min)/2,
+            hy=wall_height/2,
+            hz=wall_thickness/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
         
-        # # South wall (negative Z)
-        # builder.add_shape_box(
-        #     -1,
-        #     pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
-        #     hx=(x_max - x_min)/2,
-        #     hy=wall_height/2,
-        #     hz=wall_thickness/2,
-        #     is_solid=True,
-        #     has_shape_collision=True,            
-        #     is_visible=True,
-        # )
+        # South wall (negative Z)
+        builder.add_shape_box(
+            -1,
+            pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
+            hx=(x_max - x_min)/2,
+            hy=wall_height/2,
+            hz=wall_thickness/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
         
-        # # East wall (positive X)
-        # builder.add_shape_box(
-        #     -1,
-        #     pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
-        #     hx=wall_thickness/2,
-        #     hy=wall_height/2,
-        #     hz=(z_max - z_min)/2,
-        #     is_solid=True,
-        #     has_shape_collision=True,            
-        #     is_visible=True,
-        # )
+        # East wall (positive X)
+        builder.add_shape_box(
+            -1,
+            pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+            hx=wall_thickness/2,
+            hy=wall_height/2,
+            hz=(z_max - z_min)/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
         
-        # # West wall (negative X)
-        # builder.add_shape_box(
-        #     -1,
-        #     pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
-        #     hx=wall_thickness/2,
-        #     hy=wall_height/2,
-        #     hz=(z_max - z_min)/2,
-        #     is_solid=True,
-        #     has_shape_collision=True,            
-        #     is_visible=True,
-        # )
+        # West wall (negative X)
+        builder.add_shape_box(
+            -1,
+            pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+            hx=wall_thickness/2,
+            hy=wall_height/2,
+            hz=(z_max - z_min)/2,
+            is_solid=True,
+            has_shape_collision=True,            
+            is_visible=True,
+        )
         
-        # ================ Add maze walls ================        
-        maze_wall_length_min = self.obstacle_min_size
-        maze_wall_length_max = self.obstacle_max_size       
+        # Generate structured maze with guaranteed connectivity
+        walls = self.generate_connected_maze(x_min, x_max, z_min, z_max, wall_thickness)
         
-        # Create maze walls with random positions and orientations
-        for i in range(self.num_static_obstacles):
-            # Random wall length
-            wall_length = torch.rand(1).item() * (maze_wall_length_max - maze_wall_length_min) + maze_wall_length_min
-            
-            # Random position within arena (with margin to avoid boundary walls)
-            margin = 1.0
-            wall_x = (torch.rand(1).item() * (x_max - x_min - 2*margin) + x_min + margin)
-            wall_z = (torch.rand(1).item() * (z_max - z_min - 2*margin) + z_min + margin)
-            
-            # Random orientation (0 or 90 degrees for grid-like maze)
-            is_vertical = torch.rand(1).item() > 0.5
-            
-            if is_vertical:
-                # Vertical wall (extends in Z direction)
-                builder.add_shape_box(
-                    -1,
-                    pos=(wall_x, ground_altiude + wall_height/2, wall_z),
-                    hx=wall_thickness/2,
-                    hy=wall_height/2,
-                    hz=wall_length/2,
-                    is_solid=True,
-                    has_shape_collision=True,                    
-                    is_visible=True,
-                )
-            else:
-                # Horizontal wall (extends in X direction)
-                builder.add_shape_box(
-                    -1,
-                    pos=(wall_x, ground_altiude + wall_height/2, wall_z),
-                    hx=wall_length/2,
-                    hy=wall_height/2,
-                    hz=wall_thickness/2,
-                    is_solid=True,
-                    has_shape_collision=True,                    
-                    is_visible=True,
-                )
+        # Add maze walls to the builder
+        for wall in walls:
+            builder.add_shape_box(
+                -1,
+                pos=(wall['pos'][0], ground_altiude + wall_height/2, wall['pos'][2]),
+                hx=wall['size'][0]/2,
+                hy=wall_height/2,
+                hz=wall['size'][2]/2,
+                is_solid=True,
+                has_shape_collision=True,                    
+                is_visible=True,
+            )
 
-        self.num_static_obstacles = 0 + self.num_static_obstacles # increase by 5 for boundary walls
+        self.num_static_obstacles = 4 + len(walls)  # boundary walls + maze walls
+
+    def generate_connected_maze(self, x_min, x_max, z_min, z_max, wall_thickness):
+        """Generate a maze with guaranteed connectivity using one of several algorithms"""        
         
+        # Choose maze generation method
+        # maze_type = random.choice(['rooms_and_corridors', 'recursive_division', 'voronoi_rooms'])
+        maze_type = 'recursive_division'  # for now, just use rooms and corridors
+
+        if maze_type == 'rooms_and_corridors':
+            return self._generate_rooms_and_corridors(x_min, x_max, z_min, z_max, wall_thickness)
+        elif maze_type == 'recursive_division':
+            return self._generate_recursive_division_maze(x_min, x_max, z_min, z_max, wall_thickness)
+        else:  # voronoi_rooms
+            return self._generate_voronoi_rooms(x_min, x_max, z_min, z_max, wall_thickness)
+
+    def _generate_rooms_and_corridors(self, x_min, x_max, z_min, z_max, wall_thickness):
+        """Generate rooms connected by corridors - guarantees connectivity"""        
+        walls = []
+        
+        # Parameters
+        min_room_size = 2.0
+        max_room_size = 4.0
+        corridor_width = 1.0
+        margin = 1.0
+        
+        # Generate 3-6 rooms
+        num_rooms = random.randint(3, 6)
+        rooms = []
+        
+        # Place rooms with non-overlapping positions
+        for i in range(num_rooms):
+            attempts = 0
+            while attempts < 50:  # Prevent infinite loops
+                room_w = random.uniform(min_room_size, max_room_size)
+                room_h = random.uniform(min_room_size, max_room_size)
+                
+                room_x = random.uniform(x_min + margin + room_w/2, x_max - margin - room_w/2)
+                room_z = random.uniform(z_min + margin + room_h/2, z_max - margin - room_h/2)
+                
+                new_room = {
+                    'center': (room_x, room_z),
+                    'size': (room_w, room_h),
+                    'bounds': (room_x - room_w/2, room_x + room_w/2, room_z - room_h/2, room_z + room_h/2)
+                }
+                
+                # Check if room overlaps with existing rooms
+                overlap = False
+                for existing_room in rooms:
+                    if self._rooms_overlap(new_room, existing_room, corridor_width):
+                        overlap = True
+                        break
+                
+                if not overlap:
+                    rooms.append(new_room)
+                    break
+                attempts += 1
+        
+        # Connect rooms with L-shaped corridors
+        for i in range(len(rooms) - 1):
+            room_a = rooms[i]
+            room_b = rooms[i + 1]
+            
+            # Create L-shaped corridor from room_a to room_b
+            cx_a, cz_a = room_a['center']
+            cx_b, cz_b = room_b['center']
+            
+            # Horizontal segment from room_a to intermediate point
+            intermediate_x = cx_b
+            corridor_h1 = {
+                'center': ((cx_a + intermediate_x)/2, cz_a),
+                'size': (abs(intermediate_x - cx_a), corridor_width),
+            }
+            
+            # Vertical segment from intermediate point to room_b
+            corridor_v = {
+                'center': (intermediate_x, (cz_a + cz_b)/2),
+                'size': (corridor_width, abs(cz_b - cz_a)),
+            }
+            
+            # Add corridor walls (walls around the corridor, not blocking it)
+            corridors = [corridor_h1, corridor_v]
+            
+            for corridor in corridors:
+                cx, cz = corridor['center']
+                cw, ch = corridor['size']
+                
+                # Add walls on both sides of corridor
+                if cw > ch:  # Horizontal corridor
+                    # Top and bottom walls
+                    walls.append({
+                        'pos': (cx, 0, cz + ch/2 + wall_thickness/2),
+                        'size': (cw + wall_thickness, 0, wall_thickness)
+                    })
+                    walls.append({
+                        'pos': (cx, 0, cz - ch/2 - wall_thickness/2),
+                        'size': (cw + wall_thickness, 0, wall_thickness)
+                    })
+                else:  # Vertical corridor
+                    # Left and right walls
+                    walls.append({
+                        'pos': (cx + cw/2 + wall_thickness/2, 0, cz),
+                        'size': (wall_thickness, 0, ch + wall_thickness)
+                    })
+                    walls.append({
+                        'pos': (cx - cw/2 - wall_thickness/2, 0, cz),
+                        'size': (wall_thickness, 0, ch + wall_thickness)
+                    })
+        
+        # Add room boundary walls (with openings for corridors)
+        for room in rooms:
+            cx, cz = room['center']
+            rw, rh = room['size']
+            
+            # Add walls around each room (simplified - you may want to add corridor openings)
+            room_walls = [
+                {'pos': (cx, 0, cz + rh/2 + wall_thickness/2), 'size': (rw, 0, wall_thickness)},  # Top
+                {'pos': (cx, 0, cz - rh/2 - wall_thickness/2), 'size': (rw, 0, wall_thickness)},  # Bottom  
+                {'pos': (cx + rw/2 + wall_thickness/2, 0, cz), 'size': (wall_thickness, 0, rh)},  # Right
+                {'pos': (cx - rw/2 - wall_thickness/2, 0, cz), 'size': (wall_thickness, 0, rh)},  # Left
+            ]
+            
+            walls.extend(room_walls)
+        
+        return walls
+
+    def _generate_recursive_division_maze(self, x_min, x_max, z_min, z_max, wall_thickness):
+        """Generate maze using recursive division algorithm"""
+        walls = []
+        
+        def divide_space(x1, x2, z1, z2, min_size=6.0, max_depth=3, current_depth=0):
+            width = x2 - x1
+            height = z2 - z1
+            
+            # Stop recursion if space is too small or we've reached max depth
+            if width < min_size or height < min_size or current_depth >= max_depth:
+                return
+                
+            # Choose division direction (prefer longer dimension)
+            divide_vertically = width > height
+            
+            if divide_vertically:
+                # Divide with vertical wall that extends FULLY to boundaries
+                div_x = random.uniform(x1 + min_size/3, x2 - min_size/3)  # More conservative positioning
+                
+                # Add wall with gap (wider hallways for drone navigation)
+                gap_z = random.uniform(z1 + 3.0, z2 - 3.0)  # More buffer from boundaries
+                gap_size = 4.0
+                
+                # Wall segments - extend EXACTLY to the space boundaries (no margin)
+                if gap_z - gap_size/2 > z1:
+                    walls.append({
+                        'pos': (div_x, 0, (z1 + gap_z - gap_size/2)/2),
+                        'size': (wall_thickness, 0, gap_z - gap_size/2 - z1)
+                    })
+                
+                if gap_z + gap_size/2 < z2:
+                    walls.append({
+                        'pos': (div_x, 0, (gap_z + gap_size/2 + z2)/2),
+                        'size': (wall_thickness, 0, z2 - (gap_z + gap_size/2))
+                    })
+                
+                # Recursively divide both sides
+                divide_space(x1, div_x, z1, z2, min_size, max_depth, current_depth + 1)
+                divide_space(div_x, x2, z1, z2, min_size, max_depth, current_depth + 1)
+                
+            else:
+                # Divide with horizontal wall that extends FULLY to boundaries
+                div_z = random.uniform(z1 + min_size/3, z2 - min_size/3)  # More conservative positioning
+                
+                # Add wall with gap (wider hallways for drone navigation)
+                gap_x = random.uniform(x1 + 3.0, x2 - 3.0)  # More buffer from boundaries
+                gap_size = 4.0
+                
+                # Wall segments - extend EXACTLY to the space boundaries (no margin)
+                if gap_x - gap_size/2 > x1:
+                    walls.append({
+                        'pos': ((x1 + gap_x - gap_size/2)/2, 0, div_z),
+                        'size': (gap_x - gap_size/2 - x1, 0, wall_thickness)
+                    })
+                
+                if gap_x + gap_size/2 < x2:
+                    walls.append({
+                        'pos': ((gap_x + gap_size/2 + x2)/2, 0, div_z),
+                        'size': (x2 - (gap_x + gap_size/2), 0, wall_thickness)
+                    })
+                
+                # Recursively divide both sides
+                divide_space(x1, x2, z1, div_z, min_size, max_depth, current_depth + 1)
+                divide_space(x1, x2, div_z, z2, min_size, max_depth, current_depth + 1)
+        
+        # Start recursive division with NO MARGIN - use exact boundary coordinates
+        divide_space(x_min, x_max, z_min, z_max)
+        
+        return walls
+
+    def _generate_voronoi_rooms(self, x_min, x_max, z_min, z_max, wall_thickness):
+        """Generate rooms using Voronoi-like cell division"""        
+        walls = []
+        
+        # Generate seed points for rooms
+        num_seeds = random.randint(4, 8)
+        seeds = []
+        margin = 2.0
+        
+        for _ in range(num_seeds):
+            seed_x = random.uniform(x_min + margin, x_max - margin)
+            seed_z = random.uniform(z_min + margin, z_max - margin)
+            seeds.append((seed_x, seed_z))
+        
+        # Create walls between regions (simplified Voronoi)
+        grid_res = 0.5
+        x_coords = torch.arange(x_min, x_max, grid_res)
+        z_coords = torch.arange(z_min, z_max, grid_res)
+        
+        boundary_points = []
+        
+        for x in x_coords:
+            for z in z_coords:
+                # Find two closest seeds
+                distances = [(math.sqrt((x-sx)**2 + (z-sz)**2), i) for i, (sx, sz) in enumerate(seeds)]
+                distances.sort()
+                
+                # If close to boundary between regions, mark as wall candidate
+                if len(distances) >= 2 and distances[1][0] - distances[0][0] < 0.3:
+                    boundary_points.append((x.item(), z.item()))
+        
+        # Group boundary points into wall segments
+        # (This is a simplified approach - you might want more sophisticated wall building)
+        if boundary_points:
+            # Sample some boundary points to create walls
+            num_walls = min(len(boundary_points) // 3, self.num_static_obstacles)
+            selected_points = random.sample(boundary_points, min(num_walls * 2, len(boundary_points)))
+            
+            for i in range(0, len(selected_points) - 1, 2):
+                p1 = selected_points[i]
+                p2 = selected_points[i + 1]
+                
+                # Create wall between these points
+                center_x = (p1[0] + p2[0]) / 2
+                center_z = (p1[1] + p2[1]) / 2
+                
+                length = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+                length = max(0.5, min(length, 3.0))  # Clamp wall length
+                
+                # Random orientation
+                if random.random() > 0.5:
+                    walls.append({
+                        'pos': (center_x, 0, center_z),
+                        'size': (wall_thickness, 0, length)
+                    })
+                else:
+                    walls.append({
+                        'pos': (center_x, 0, center_z),
+                        'size': (length, 0, wall_thickness)
+                    })
+        
+        return walls
+
+    def _rooms_overlap(self, room1, room2, buffer=0.5):
+        """Check if two rooms overlap with buffer zone"""
+        x1_min, x1_max, z1_min, z1_max = room1['bounds']
+        x2_min, x2_max, z2_min, z2_max = room2['bounds']
+        
+        # Add buffer
+        x1_min -= buffer
+        x1_max += buffer
+        z1_min -= buffer
+        z1_max += buffer
+        
+        return not (x1_max < x2_min or x2_max < x1_min or z1_max < z2_min or z2_max < z1_min)
+
+
     def create_model(self):
         """Create model and ensure control() allocates a differentiable user_act tensor."""
         model = super().create_model()
@@ -586,7 +866,7 @@ class DroneParcour(WarpEnv):
             c = original_control_fn(requires_grad=requires_grad_arg, clone_variables=clone_variables, copy=copy)
             if not hasattr(c, "body_force"):
                 c.body_force = wp.zeros(  # type: ignore[attr-defined]
-                    (num_envs, 4), dtype=float, device=device, requires_grad=requires_grad
+                    (num_envs, self.num_act_controller), dtype=float, device=device, requires_grad=requires_grad
                 )
             return c
 
@@ -633,41 +913,70 @@ class DroneParcour(WarpEnv):
             has_shape_collision=False,
             has_ground_collision=False,
         )
+
+        # marker to indicate forward direction
+        builder.add_shape_cylinder(
+            body,           
+            pos=(0.25, 0.1, 0.0),
+            up_axis=0,
+            radius=0.01, 
+            half_height=0.25, # half the arm-lenght is quarter of span
+            density=0.0,
+            is_solid=True,            
+            has_shape_collision=False,
+            has_ground_collision=False,
+        )
        
         # build props and arms
         props = []        
         
-        arm_rot = [
-            math.pi/4, 
-            -math.pi/4, 
-            -math.pi*3/4, 
-            math.pi*3/4
-        ]
-
-        # X-configuration: [CW, CCW, CW, CCW] for [front left, front right, back right, back left]
-        turning_directions = [
-            1.0,
-            -1.0,
-            1.0,
-            -1.0
-        ]
+        thetas = [-30, 30, 90, 150, 210, 270]
+        thetas = [theta * math.pi/180 for theta in thetas]
+        polarity = [1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
 
         prop_positions_b = []
-        for rot in arm_rot:
-            # Rotate the vector (arm_length, 0.0, 0.0) by arm_rot around Y axis using warp
-            base_vector = wp.vec3(arm_length, 0.0, 0.0)
-            rotation_quat = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), rot)
-            rotated_vector = wp.quat_rotate(rotation_quat, base_vector)            
-            prop_positions_b.append((rotated_vector[0], rotated_vector[1], rotated_vector[2]))        
-        
-        for i, (prop_position, turning_dir, rot) in enumerate(zip(prop_positions_b, turning_directions, arm_rot)):
+
+        # Initialize as numpy array first for easier manipulation
+        drone_force_torque_mapping = np.zeros([6, 6], dtype=np.float32)
+ 
+        for i in range(6):
+            theta = thetas[i]
+            turning_dir = polarity[i]
+            alpha = -polarity[i] * math.radians(self.tilt_angle_deg)
+
+            quat_BtildeMi = wp.quat_rpy(alpha, 0.0, theta)  
+
+            p_armCenter_B = -wp.quat_rotate(self.quat_BBtilde * quat_BtildeMi, wp.vec3(-arm_length, 0.0, 0.0)) / 2.0 # center of arm in body frame          
+            o_Mi_B = -wp.quat_rotate(self.quat_BBtilde * quat_BtildeMi, wp.vec3(-arm_length, 0.0, self.arm_specs[0]))  # origin of motor frame in body frame            
+            p_prop_B = -wp.quat_rotate(self.quat_BBtilde * quat_BtildeMi, wp.vec3(-arm_length, 0.0, self.arm_specs[0] + self.motor_specs[1] / 2 + self.prop_thickness / 2)) # center of prop in body frame
             
-            # add arm
-            arm_center_pos_b = (prop_position[0]/2.0, prop_position[1]/2.0, prop_position[2]/2.0)
+            prop_radius = self.prop_diameter_inch / 2 * 0.0254
+
+            # Air density at sea level
+            rho = 1.225  # kg/m³
+            
+            # For typical quadcopter propellers, use reasonable CT and CP values
+            # CT ≈ 0.1-0.15, CP ≈ 0.05-0.08 for efficient props
+            # Pitch affects thrust efficiency: higher pitch = higher thrust per RPM
+            C_T = 0.15  # thrust coefficient
+            C_P = 0.05  # power coefficient
+
+            C_Q = C_P / (2.0 * 3.14159)
+
+            k_f = C_T * rho * ((prop_radius*2) ** 4) / (4.0 * 3.14159**2)
+            k_d = C_Q * rho * ((prop_radius*2) ** 5) / (4.0 * 3.14159**2)
+
+            r_3_i = wp.quat_rotate(self.quat_BBtilde * quat_BtildeMi, wp.vec3(0.0, 0.0, -1.0))
+          
+            # Convert warp vectors to numpy and assign
+            drone_force_torque_mapping[:3, i] = np.array(r_3_i * k_f)
+            drone_force_torque_mapping[3:6, i] = np.array(r_3_i * (k_d * polarity[i]) + wp.cross(o_Mi_B, r_3_i * k_f))                
+
+            # add arm            
             builder.add_shape_cylinder(
                 body,
-                pos=arm_center_pos_b,
-                rot=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), rot),
+                pos=p_armCenter_B,
+                rot=self.quat_BBtilde * quat_BtildeMi,
                 up_axis=0,
                 radius=self.arm_specs[0]/2, 
                 half_height=self.arm_specs[2]/4, # half the arm-lenght is quarter of span
@@ -684,9 +993,9 @@ class DroneParcour(WarpEnv):
             # Motors
             builder.add_shape_cylinder(
                 body,
-                pos=(prop_position[0], prop_position[1] + self.arm_specs[0]/2 + self.motor_specs[1]/2, prop_position[2]),
-                rot=wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), rot),
-                up_axis=1,
+                pos=o_Mi_B,
+                rot=self.quat_BBtilde * quat_BtildeMi,
+                up_axis=2,
                 radius=self.motor_specs[0]/2,            
                 half_height=self.motor_specs[1]/2, 
                 density=motor_equivalent_density,
@@ -695,22 +1004,33 @@ class DroneParcour(WarpEnv):
                 has_ground_collision=False,
             )
             
-            props.append(
-                define_propeller(
-                    body,
-                    pos=prop_position,
-                    diameter=self.prop_diameter,
-                    pitch=self.prop_pitch,
-                    thickness=self.prop_thickness,
-                    density=self.density_carbon,
-                    turning_direction=turning_dir,
-                )
+            prop_disk_volume = math.pi * prop_radius**2 * self.prop_thickness
+            prop_disk_equivalent_density = self.prop_weight / prop_disk_volume
+
+            # Props
+            builder.add_shape_cylinder(
+                body,
+                pos=p_prop_B,
+                rot=self.quat_BBtilde * quat_BtildeMi,
+                up_axis=2,
+                radius=prop_radius,
+                half_height=self.prop_thickness / 2,
+                density=prop_disk_equivalent_density,
+                is_solid=True,                      
+                has_shape_collision=False,
+                has_ground_collision=False,
             )
+                        
+            prop_positions_b.append((p_prop_B[0], p_prop_B[1], p_prop_B[2]))  
         
+        # Convert to warp array after all assignments are done
+        # drone_force_torque_mapping[drone_force_torque_mapping < 1e-11] = 0.0 
+        self._drone_force_torque_mapping = wp.array(drone_force_torque_mapping, dtype=wp.float32)
+
         # Store prop data for force calculations
         self.props = props
-        self.turning_directions = turning_directions
-        self.prop_positions = prop_positions_b        
+        self.turning_directions = polarity
+        self.prop_positions = prop_positions_b
 
     def init_sim(self):
         super().init_sim()
@@ -735,17 +1055,6 @@ class DroneParcour(WarpEnv):
         self.model.apply_external_forces = self.apply_drone_forces
         self.model.compute_collision_distances = self.compute_collision_distances
         self.model.compute_depth_observations = self.compute_depth_observations
-
-        # Create Warp arrays directly from stored prop data
-        self._prop_positions_wp = wp.array(self.prop_positions, dtype=wp.vec3, device=self.model.device)  # type: ignore[attr-defined]
-        self._k_f_wp = wp.array([prop.k_f for prop in self.props], dtype=float, device=self.model.device)  # type: ignore[attr-defined]
-        self._k_d_wp = wp.array([prop.k_d for prop in self.props], dtype=float, device=self.model.device)  # type: ignore[attr-defined]
-        self._turning_dir_wp = wp.array(self.turning_directions, dtype=float, device=self.model.device)  # type: ignore[attr-defined]        
-        self._thrust_dir_local_wp = wp.vec3(0.0, 1.0, 0.0)  # type: ignore[attr-defined]
-        # drone body index per env (assumes 1 dynamic body per env)
-        drone_indices = list(range(self.num_envs))
-        self._drone_body_index_wp = wp.array(drone_indices, dtype=int, device=self.model.device)  # type: ignore[attr-defined]
-
         
         # Display drone specifications
         self.print_drone_specs()
@@ -806,41 +1115,14 @@ class DroneParcour(WarpEnv):
         # Calculate max thrust per motor at max RPM
         # Thrust = k_f * omega² where omega = 2π * RPM / 60
         max_omega = 2 * 3.14159 * max_rpm / 60.0  # rad/s
-        max_thrust_per_motor = self.props[0].k_f * (max_omega ** 2)
-        max_drag_per_motor = self.props[0].k_d * (max_omega ** 2)
-        
-        # Calculate total max thrust (4 motors)
-        total_max_thrust = 4 * max_thrust_per_motor
-        total_max_drag = 4 * max_drag_per_motor
+
+        res = wp.to_torch(self._drone_force_torque_mapping).cpu() @ torch.ones((6,1))* max_omega**2 
+        total_max_thrust = res[1].item()   
         
         # Calculate thrust-to-weight ratio
-        total_mass = wp.to_torch(self.model.body_mass)
+        total_mass = wp.to_torch(self.model.body_mass)[0].item()
         total_weight = total_mass * abs(self.gravity)
         thrust_to_weight_ratio = total_max_thrust / total_weight
-        
-        # Calculate body inertia and maximum angular acceleration
-        body_inertia = self.model.body_inertia.numpy()  # [num_bodies, 3] - Ixx, Iyy, Izz
-        if len(body_inertia) > 0:
-            # Get inertia of first drone body (assuming all drones are identical)
-            inertia = body_inertia[0]  # [Ixx, Iyy, Izz]
-            
-            # Calculate maximum torque from propellers
-            # For a quadcopter with props at distance 'arm_length' from center
-            arm_length = self.arm_specs[2] / 2.0  # half span = distance from center to prop
-            
-            # Maximum pitch/roll torque: differential thrust between front/back or left/right
-            max_pitch_roll_torque = math.sqrt(2) * max_thrust_per_motor * arm_length
-            
-            # Maximum yaw torque: all props spinning in same direction contribute drag torque
-            max_yaw_torque = total_max_drag
-            
-            # Maximum angular accelerations (rad/s²)
-            max_roll_accel = max_pitch_roll_torque / inertia[0,0]   # around x-axis
-            max_pitch_accel = max_pitch_roll_torque / inertia[1,1]  # around y-axis  
-            max_yaw_accel = max_yaw_torque / inertia[2,2]           # around z-axis
-        else:
-            inertia = [0, 0, 0]
-            max_roll_accel = max_pitch_accel = max_yaw_accel = 0
         
         # Display specifications
         print("\n" + "="*60)
@@ -857,49 +1139,23 @@ class DroneParcour(WarpEnv):
         print(f"   Max RPM: {max_rpm:.0f}")
         
         print(f"\n⚖️ Mass & Inertia:")        
-        print(f"   Total mass: {total_mass[0]:.3f} kg")
+        print(f"   Total mass: {total_mass:.3f} kg")
         print(f"   Body inertia (kg·m²):")
-        print(f"     Ixx (roll):  {inertia[0,0]:.6f}")        
-        print(f"     Izz (pitch):   {inertia[2,2]:.6f}")
-        print(f"     Iyy (yaw): {inertia[1,1]:.6f}")
 
-        print(f"\n⚡ Thrust & Performance:")
-        print(f"   Max thrust per motor: {max_thrust_per_motor:.2f} N")
-        print(f"   Max drag per motor: {max_drag_per_motor:.2f} N")
-        print(f"   Total max thrust: {total_max_thrust:.2f} N")
-        print(f"   Total max drag: {total_max_drag:.2f} N")
-        print(f"   Total weight: {total_weight[0]:.2f} N ({total_mass[0]:.3f} kg)")
-        print(f"   Thrust-to-weight ratio: {thrust_to_weight_ratio[0]:.2f}")
-        
-        print(f"\n🔄 Angular Performance:")
-        print(f"   Max roll acceleration:  {max_roll_accel:.1f} rad/s² ({max_roll_accel*180/3.14159:.0f} deg/s²)")
-        print(f"   Max pitch acceleration: {max_pitch_accel:.1f} rad/s² ({max_pitch_accel*180/3.14159:.0f} deg/s²)")
-        print(f"   Max yaw acceleration:   {max_yaw_accel:.1f} rad/s² ({max_yaw_accel*180/3.14159:.0f} deg/s²)")
+        print(f"\n⚡ Thrust & Performance:")                
+        print(f"   Total max straight hover thrust: {total_max_thrust:.2f} N")        
+        print(f"   Total weight: {total_weight:.2f} N ({total_mass:.3f} kg)")
+        print(f"   Thrust-to-weight ratio: {thrust_to_weight_ratio:.2f}")
         
         # Overall performance based on thrust-to-weight ratio
-        if thrust_to_weight_ratio[0] > 2.0:
+        if thrust_to_weight_ratio > 2.0:
             print(f"   🚀 Performance: Excellent (>2.0)")
-        elif thrust_to_weight_ratio[0] > 1.5:
+        elif thrust_to_weight_ratio > 1.5:
             print(f"   ✈️ Performance: Good (1.5-2.0)")
-        elif thrust_to_weight_ratio[0] > 1.0:
+        elif thrust_to_weight_ratio > 1.0:
             print(f"   🛸 Performance: Adequate (1.0-1.5)")
         else:
             print(f"   ⚠️ Performance: Poor (<1.0) - may not hover!")
-        
-        # Responsiveness based on angular acceleration
-        avg_angular_accel = (max_roll_accel + max_pitch_accel + max_yaw_accel) / 3.0
-        if avg_angular_accel > 50.0:
-            print(f"   ⚡ Responsiveness: Extremely agile (>{50:.0f} rad/s²)")
-        elif avg_angular_accel > 30.0:
-            print(f"   🎯 Responsiveness: Very agile ({30:.0f}-{50:.0f} rad/s²)")
-        elif avg_angular_accel > 15.0:
-            print(f"   🎮 Responsiveness: Agile ({15:.0f}-{30:.0f} rad/s²)")
-        elif avg_angular_accel > 8.0:
-            print(f"   📐 Responsiveness: Moderate ({8:.0f}-{15:.0f} rad/s²)")
-        else:
-            print(f"   🐌 Responsiveness: Sluggish (<{8:.0f} rad/s²)")
-        
-        print("="*60 + "\n")
 
     def apply_drone_forces(self, model, state, control=None):        
         wp.launch(
@@ -910,17 +1166,13 @@ class DroneParcour(WarpEnv):
                 model.body_com,
                 state.body_qd,
                 state.body_f,
-                self.sim_view._drone_indices_wp,                
+                self.sim_view._drone_indices_wp,                                
+                self._drone_force_torque_mapping,
                 control.body_force,
-                self._prop_positions_wp,
-                self._thrust_dir_local_wp,
-                self._k_f_wp,
-                self._k_d_wp,
-                self._turning_dir_wp,                
                 float(self.max_rpm),
             ),
             device=self.model.device,
-        )
+        )        
 
     def render(self, state=None):
         """Override render to show dynamic target spheres"""        
@@ -1000,8 +1252,12 @@ class DroneParcour(WarpEnv):
                 if not hasattr(self, '_debug_fig'):
                     num_to_show = min(16, self.num_envs)
                     n_row_col = math.ceil(math.sqrt(num_to_show))
-                    self._debug_fig, self._debug_axes = plt.subplots(n_row_col, n_row_col, figsize=(6, 6))
-                    self._debug_axes = self._debug_axes.flatten()
+                    self._debug_fig, axes = plt.subplots(n_row_col, n_row_col, figsize=(6, 6))
+                    if num_to_show == 1:
+                        self._debug_axes = [axes]  # Convert single Axes to list
+                    else:
+                        self._debug_axes = axes.flatten()  # Multiple axes - flatten as before
+                        
                     self._debug_images = []
                     
                     # Initialize image objects                    
@@ -1134,11 +1390,87 @@ class DroneParcour(WarpEnv):
 
     def pre_physics_step(self, actions):        
         # Clamp actions to [-1, 1] range
-        actions = torch.clamp(actions, -1.0, 1.0)        
-        body_force = (actions + 1.0) * 0.5        
-        self.applied_body_force = body_force.detach()        # for observations and rewards
-        self.control.assign("body_force", body_force)        
-    
+        actions = torch.clamp(actions, -1.0, 1.0)                        
+        self.last_actor_cmd = actions.clone()
+
+        body_q, body_qd = self.sim_view.get_drone_states(self.state)
+        omega_body_W = quat_rotate(body_q[:, 3:7], body_qd[:, 0:3])
+                                 
+        body_qd_desired_B = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype)       
+        # body_qd_desired_B[:, 0] = 0.1  
+        # body_qd_desired_B[:, :3] = actions[:, :3] * self.max_target_ang_vel  # ang vel cmd
+        body_qd_desired_B[:, 3:6] = actions[:, :3] * self.max_target_lin_vel  # lin vel cmd
+        body_qd_desired_B[:, 1] = actions[:, 3] * self.max_target_ang_vel  # ang vel cmd        
+
+        # ============== ATTITUDE CONTROL LAW ==============        
+        # Get current orientation
+        quat_current = body_q[:, 3:7]  # [x, y, z, w]
+        body_y = quat_rotate(quat_current, torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
+        world_up = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1)
+
+        attitude_error_W = torch.cross(body_y, world_up, dim=1)
+        attitude_error_B = quat_rotate(quat_conjugate(quat_current), attitude_error_W)
+       
+        body_qd_desired_B[:, (0,2)] = 1.0 * attitude_error_B[:, (0,2)]
+        
+        # compute control input in world frame
+        body_qd_desired_W = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype)         
+        body_qd_desired_W[:, 0:3] = quat_rotate(body_q[:, 3:7], body_qd_desired_B[:, 0:3]) 
+        body_qd_desired_W[:, 3:6] = quat_rotate(body_q[:, 3:7], body_qd_desired_B[:, 3:6])
+
+        # control input in world frame
+        body_qdd_cmd_W = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype) 
+
+        gain_p_ang = 3.0     
+        gain_p_lin = 10.0           
+        
+        body_qdd_cmd_W[:, 0:3] = gain_p_ang * (body_qd_desired_W[:, 0:3] - body_qd[:, 0:3]) # control input to control angular velocity
+        body_qdd_cmd_W[:, 3:6] = gain_p_lin * (body_qd_desired_W[:, 3:6] - body_qd[:, 3:6]) # control input to control linear velocity
+
+        # Get mass and inertia tensors (convert to torch first, then index)
+        all_masses = wp.to_torch(self.model.body_mass)  # Convert full array to torch
+        all_inertias = wp.to_torch(self.model.body_inertia)  # Convert full array to torch
+        
+        # Now index with torch tensors
+        drone_indices_torch = wp.to_torch(self.sim_view._drone_indices_wp)
+        m = all_masses[drone_indices_torch]  # shape: (num_envs,)
+        I_b = all_inertias[drone_indices_torch]  # shape: (num_envs, 3, 3)
+       
+        # mass matrix
+        num_envs = m.shape[0]
+        M = torch.zeros((num_envs, 6, 6), device=self.device, dtype=m.dtype)
+        M[:, 3, 3] = m  # m for x translation
+        M[:, 4, 4] = m  # m for y translation  
+        M[:, 5, 5] = m  # m for z translation
+        M[:, :3, :3] = I_b
+      
+        # intrinsic forces in world frame
+        f_W = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype)
+        f_W[:, 0:3] = torch.cross(omega_body_W, (I_b @ omega_body_W[:, 0:, None]).squeeze(-1), dim=1) # rotational
+        f_W[:, 3:6] = m[:,None] * torch.tensor([0.0, self.gravity, 0.0], device=self.device)[None,:] # translational        
+
+        # input force and wrench mapping
+        F_B = wp.to_torch(self._drone_force_torque_mapping[0:3, :])[None,:,:].expand(self.num_envs, -1, -1)
+        Tau_B = wp.to_torch(self._drone_force_torque_mapping[3:6, :])[None,:,:].expand(self.num_envs, -1, -1)
+
+        # transform input force mapping to world frame
+        F_W = torch.zeros_like(F_B)
+        for i in range(F_B.shape[2]):  # For each of the 6 force vectors
+            F_W[:, :, i] = quat_rotate(body_q[:, 3:7], F_B[:, :, i])
+      
+        J = torch.zeros((num_envs, 6, 6), device=self.device, dtype=body_qd.dtype)
+        J[:, 0:3, :] = Tau_B
+        J[:, 3:6, :] = F_W
+
+        # Solve: u = pinv(F_world) @ ((M @ body_qdd_cmd) - f_W)
+        rhs = (M @ body_qdd_cmd_W[:,:,None]) - f_W[:,:,None]
+        rpm_cmd = torch.linalg.pinv(J) @ rhs       
+        rpm_cmd = torch.sign(rpm_cmd) * torch.sqrt(torch.abs(rpm_cmd)) / (self.max_rpm * 2 * math.pi / 60)
+        rpm_cmd = torch.clamp(rpm_cmd, -1.0, 1.0)        
+
+        self.last_power_draw = torch.sum(rpm_cmd**2, dim=1).squeeze() / 6.0  # normalized power draw (0 to 1)
+        self.control.assign("body_force", rpm_cmd.squeeze(-1))
+
     def compute_depth_observations(self, model, state):
         if not self.use_depth_observations:
             return
@@ -1149,7 +1481,7 @@ class DroneParcour(WarpEnv):
                 dim=(self.num_envs, self.cam_width * self.cam_height),
                 inputs=[
                     state.body_q,
-                    self._drone_body_index_wp,
+                    self.sim_view._drone_indices_wp,
                     model.shape_transform,
                     model.shape_geo,
                     self.indices_shape_with_collision,                    
@@ -1185,37 +1517,89 @@ class DroneParcour(WarpEnv):
             device=model.device
         )                
 
+    def compute_imu_readings(self, body_q, body_qd, body_f, body_mass):
+           
+        omega_body_B = body_qd[:, 0:3] 
+
+        # compute specific force measured by IMU        
+        specific_force_B = quat_rotate(quat_conjugate(body_q[:, 3:7]), - body_f[:, 3:6] / body_mass[:,None])
+        
+        acc_imu_B = specific_force_B + self.imu_accel_bias + torch.randn_like(specific_force_B) * self.imu_accel_noise_std
+        gyro_imu_B = omega_body_B + self.imu_gyro_bias + torch.randn_like(omega_body_B) * self.imu_gyro_noise_std
+        
+        return acc_imu_B, gyro_imu_B        
+    
     def compute_observations(self):
         """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
         # Get drone states using the simulation view
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
-        # last actions
-        last_actions = self.applied_body_force # shape (N, 4)
-        closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0]
+        # target up-axis in world frame
+        target_up_axis_W = quat_rotate(self.target_body_q[:, 3:7], torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
+        target_up_axis_B = quat_rotate(quat_conjugate(body_q[:, 3:7]), target_up_axis_W)
+
+        # target heading and target distance
+        pos_err_B = quat_rotate(quat_conjugate(body_q[:, 3:7]), self.target_body_q[:, 0:3] - body_q[:, 0:3])
+        target_dist = torch.norm(pos_err_B, dim=1)[:,None]
+        target_dir_B = pos_err_B / torch.clamp(target_dist, min=0.1)
+
+        # Compute IMU readings (accelerometer and gyroscope)
+        drone_idx = wp.to_torch(self.sim_view._drone_indices_wp)
+        body_f = wp.to_torch(self.state_0_bwd.body_f)[drone_idx]
+        body_mass = wp.to_torch(self.model.body_mass)[drone_idx]
+        linAcc_body_B, angRates_body_B = self.compute_imu_readings(body_q, body_qd, body_f, body_mass)
+
+        # purely body centric observations
         obs_parts = [
-            body_q,
-            body_qd,
-            self.target_body_q,
-            self.target_body_qd,
-            last_actions,
-            closest_collision_distance.unsqueeze(1)
+            linAcc_body_B / 9.81,
+            angRates_body_B,
+            target_dist, 
+            target_dir_B,
+            target_up_axis_B
         ]
-        
-        if self.use_depth_observations:
-            # visual_obs = (wp.to_torch(self._cam_depths_wp) - self.cam_min_depth) / (self.cam_max_depth - self.cam_min_depth)
-            visual_obs = wp.to_torch(self._cam_depths_wp)
-            obs_parts.append(visual_obs)
-            
+
         obs = torch.cat(obs_parts, dim=-1)
 
         # data hygiene
         nan_mask = torch.isnan(obs)
         obs = torch.where(nan_mask, torch.randn_like(obs) * 0.1, obs)
-        # obs = torch.clamp(obs, -2e1, 2e1)       
+        obs = torch.clamp(obs, -2e1, 2e1)      
+        
+        # visual_obs = (wp.to_torch(self._cam_depths_wp) - self.cam_min_depth) / (self.cam_max_depth - self.cam_min_depth)
+        if self.use_depth_observations:
+            obs_dict = {
+                'obs': obs,
+                'visual_obs': wp.to_torch(self._cam_depths_wp).reshape(self.num_envs, self.cam_height, self.cam_width).unsqueeze(-1)
+            }
+            self.obs_buf = obs_dict
+        else:
+            self.obs_buf = obs
 
-        self.obs_buf = obs
+    def create_obs_space(self, num_obs_dict):                
+        vector_obs_size = num_obs_dict.get('obs', 16)
+        if self.use_depth_observations:
+            depth_obs_shape = num_obs_dict.get('obs_depth', None)
+        obs_spaces = {}
+        
+        # Main observation vector (pose, velocity, targets, etc.)
+        obs_spaces['obs'] = spaces.Box(
+            low=-np.inf, 
+            high=np.inf, 
+            shape=(vector_obs_size,), 
+            dtype=np.float32
+        )
+        
+        # Visual observations (depth images)
+        if self.use_depth_observations and depth_obs_shape is not None:
+            obs_spaces['visual_obs'] = spaces.Box(
+                low=self.cam_min_depth,
+                high=self.cam_max_depth,
+                shape=(depth_obs_shape[1], depth_obs_shape[0], 1),  # (H, W, C)
+                dtype=np.float32
+            )
             
+        return spaces.Dict(obs_spaces)
+
     def compute_reward(self):
         # Get drone states using the simulation view
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
@@ -1227,79 +1611,69 @@ class DroneParcour(WarpEnv):
         vel_err_norm = torch.norm(self.target_body_qd[:, 3:6] - body_qd[:, 3:6], dim=1)
         ang_vel_err = torch.norm(self.target_body_qd[:, :3] - body_qd[:, :3], dim=1)
 
-        # Orientation error: q_err rotates current -> target
-        q_err = quat_mul(body_q[:, 3:7], quat_conjugate(self.target_body_q[:, 3:7]))
-        q_err_norm = torch.norm(q_err, dim=-1, keepdim=True)
-        q_err = q_err / (q_err_norm + 1e-9)
-        q_err = torch.where(q_err[:, 3:4] < 0.0, -q_err, q_err) # Enforce shortest rotation
-
-        v = q_err[:, :3]
-        w = q_err[:, 3:4]
-        v_norm = torch.norm(v, dim=1, keepdim=True)
-        ori_err_angle = 2.0 * torch.atan2(v_norm, torch.clamp(w, min=1e-9))  # (N,1)
-        ori_err_axis = v / (v_norm + 1e-9)
-        ori_err_vec = ori_err_axis * ori_err_angle                            # (N,3)
-
-        # target proximity reward
-        # target_proximity_reward = 2.0 * torch.exp(-1.0 * pos_err_norm)
-        target_proximity_reward = 1.0 / (1.0 + pos_err_norm)
-
-        orientation_penalty = -1.0* torch.norm(ori_err_vec, dim=-1)
-
-        distance_gate = torch.exp(-0.5 * pos_err_norm)
-        target_rate_mismatch_bonus = distance_gate * (torch.exp(-1.0 * vel_err_norm) + torch.exp(-1.0 * ang_vel_err))
-
-        action_penalty = -0.001 * torch.norm(self.applied_body_force, dim=-1)
-
         # ===================== Arena Boundary Barriers =========================
         arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
         arena_maxs = self.arena_bounds[:, 1]  # [x_max, y_max, z_max]
         start_penalizing_before_arenabounds = 0.5  # meters before hitting the boundary
-        beta_softplus_arenabounds = 0.5 # the higher the sharper the corner
+        beta_softplus_arenabounds = 3.0 # the higher the sharper the corner
 
         # how much outside of the arena is the drone?
         dist_to_min = arena_mins - pos
         dist_to_max = pos - arena_maxs
 
         how_much_outside, _ = torch.max(torch.cat((dist_to_min, dist_to_max), dim=1), dim=1)
-        outside_penalty = -torch.nn.functional.softplus(how_much_outside + start_penalizing_before_arenabounds, beta=beta_softplus_arenabounds)
+        outside_penalty = -1.0 * torch.nn.functional.softplus(how_much_outside + start_penalizing_before_arenabounds, beta=beta_softplus_arenabounds)
+
+        action_penalty = -0.01 * torch.sum(self.last_actor_cmd[:, :3]**2, dim=-1) + -0.1 * torch.abs(self.last_actor_cmd[:, 3])
+
+        # ===================== Target =========================                   
+        target_proximity_reward = 1.0 / (1.0 + pos_err_norm)   
+
+        distance_gate = 1.0 / (1.0 + pos_err_norm**2)    
+
+        target_rate_mismatch_penalty = - distance_gate * torch.exp(0.1 * ang_vel_err)
+        target_rate_mismatch_penalty = torch.clamp(target_rate_mismatch_penalty, min=-5.0)
+
+        # body up-axis in world frame
+        body_up_axis = quat_rotate(body_q[:, 3:7], torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))        
+        # target up-axis in world frame
+        target_up_axis = quat_rotate(self.target_body_q[:, 3:7], torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
+        
+        orientation_reward = 0.1 * distance_gate * (1.0 + (body_up_axis[:,None,:] @ target_up_axis[:,:,None]).squeeze())
 
         # ====================== Angular Speed Barrier =========================
         ang_speed = torch.linalg.norm(body_qd[:, :3], dim=1)
-        max_ang_speed = 30.0  # rad/s
-        start_penalizing_before_ratelimit = 10.0
-        beta_softplus_ang_speed = 0.5  # the higher the sharper the corner
-        how_much_spinning_too_fast = ang_speed - max_ang_speed
-        ratelimit_penalty = -0.01*torch.nn.functional.softplus(how_much_spinning_too_fast + start_penalizing_before_ratelimit, beta=beta_softplus_ang_speed)
-        
+        max_ang_speed = 1.0  # rad/s
+        ratelimit_penalty = -(torch.exp(ang_speed / max_ang_speed) - 1.0)
+        ratelimit_penalty = torch.clamp(ratelimit_penalty, min=-5.0)
+
         # ===================== Collision Barrier =========================        
-        collision_threshold = 0.2  # meters - start penalizing when closer than this
-        beta_collision = 10.0  # the higher the sharper the corner
-        
+        max_collision_penalty = 1.0
+        steepness = 2.0
         if self.use_collision_distances:
-            closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0]
-            how_close_to_collision = closest_collision_distance - collision_threshold
-            collision_penalty = -0.01 * torch.exp(- beta_collision * torch.tensor(how_close_to_collision))
+            closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0] 
+            collision_penalty = -max_collision_penalty / (1.0 + (closest_collision_distance * steepness)**2)
         else:
             collision_penalty = 0.0
 
         progress_reward = 0.01 * self.progress_buf
         
         reward = (
-            # target_proximity_reward  # goal directedness
-            + progress_reward        # progress reward              
-            # + action_penalty         # action cost
-            + outside_penalty  # arena boundary barriers (differentiable)
-            # + ratelimit_penalty  # angular speed barrier (differentiable)
-            # + collision_penalty  # collision avoidance (differentiable SDF-based)
-            # + orientation_penalty * target_proximity_reward # penalize orientation error at goal
-            # + target_rate_mismatch_bonus # penalize target rate mismatch at goal
+            # -pos_err_norm * 1.0 
+            + target_proximity_reward
+            # + target_rate_mismatch_penalty     
+            # + orientation_reward 
+            + outside_penalty             
+            + collision_penalty
+            # + action_penalty
+            # + orientation_penalty
+            # + progress_reward
         )
 
         # data hygiene
         nan_mask = torch.isnan(reward)
         reward = torch.where(nan_mask, torch.randn_like(reward) * 0.1, reward)
-        # reward = torch.clamp(reward, -1e3, 1e3)        
+        # reward = torch.clamp(reward, -1e2, 1e2)        
 
         # Truncation/termination (ant-like structure, but with sensible failsafes)
         reset_buf, progress_buf = self.reset_buf, self.progress_buf
@@ -1310,17 +1684,17 @@ class DroneParcour(WarpEnv):
 
         if early_termination:
             # Hard termination only for extreme violations -> if way beyond barrier functions            
-            is_too_fast = how_much_spinning_too_fast > start_penalizing_before_ratelimit
-            is_way_outside = how_much_outside > start_penalizing_before_arenabounds
+            is_too_fast = ang_speed > 10.0
+            is_way_outside = how_much_outside > 1.0
             if self.use_collision_distances:
-                is_colliding = closest_collision_distance < collision_threshold
+                is_colliding = closest_collision_distance < self.arm_specs[2] / 2.0 + 0.2
             else:
                 is_colliding = torch.zeros_like(is_too_fast)
 
-            terminated = is_too_fast | is_way_outside | is_colliding
+            terminated = is_too_fast | is_colliding | is_way_outside
             reset = torch.where(terminated, torch.ones_like(reset), reset)
 
-            # reward[terminated] -= 10.0 # termination penalty            
+            # reward[terminated] -= 1.0 # termination penalty            
         else:
             terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
 

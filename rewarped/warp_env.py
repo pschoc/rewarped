@@ -179,7 +179,8 @@ class WarpEnv(Environment):
 
         self.num_obs = num_obs
         self.num_act = num_act
-        self.obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_obs,), dtype=np.float32)
+        if self.obs_space is None:
+            self.obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_obs,), dtype=np.float32)
         self.act_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_act,), dtype=np.float32)
 
         self.scatter_actions = staticmethod(scatter_clone)  # alias for convenience
@@ -233,11 +234,35 @@ class WarpEnv(Environment):
 
     def allocate_buffers(self):
         # Allocate buffers
-        self.obs_buf = torch.zeros(
-            (self.num_envs, self.num_obs),
-            dtype=torch.float,
-            device=self.device,
-        )
+        if isinstance(self.num_obs, dict):
+            # Dictionary observation buffers
+            self.obs_buf = {}
+            
+            for key, shape in self.num_obs.items():
+                if shape is not None:  # Skip None values (disabled observations)
+                    if key == 'obs':
+                        # Vector observations: (num_envs, obs_size)
+                        self.obs_buf[key] = torch.zeros(
+                            (self.num_envs, shape),
+                            dtype=torch.float,
+                            device=self.device,
+                        )
+                    elif key == 'obs_depth':
+                        # Image observations: (num_envs, height, width, channels)
+                        height, width = shape
+                        self.obs_buf[key] = torch.zeros(
+                            (self.num_envs, height, width, 1),
+                            dtype=torch.float,
+                            device=self.device,
+                        )
+        else:
+            # Legacy: simple vector observations
+            self.obs_buf = torch.zeros(
+                (self.num_envs, self.num_obs),
+                dtype=torch.float,
+                device=self.device,
+            )
+
         self.actions = torch.zeros(
             (self.num_envs, self.num_act),
             dtype=torch.float,
