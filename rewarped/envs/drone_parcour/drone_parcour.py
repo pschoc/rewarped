@@ -366,6 +366,13 @@ class DroneParcour(WarpEnv):
         self.debug_pov = kwargs.pop("debug_pov", False)
         self.ground_plane = kwargs.pop("ground_plane", True)
         self.has_static_obstacles = kwargs.pop("has_static_obstacles", False)
+        self.no_env_offset = kwargs.pop("no_env_offset", False)
+
+        frame_fps = kwargs.pop("frame_fps", 4)  # Simulation steps per second
+        self.frame_dt = 1.0 / frame_fps  # seconds per frame
+        solver_fps = kwargs.pop("solver_fps", 400)  # Solver steps per second        
+        self.sim_substeps = round(solver_fps / frame_fps)
+        self.episode_duration = kwargs.pop("max_episode_duration", max_episode_length)  # seconds
 
         self.gravity = kwargs.pop("gravity", -9.81)  # m/s²
         self.max_target_lin_vel = kwargs.pop("max_target_lin_vel", 1.0)  # m/s
@@ -470,6 +477,7 @@ class DroneParcour(WarpEnv):
   
         self.last_actor_cmd = torch.zeros((num_envs, self.num_act_controller), device=device, requires_grad=True)
         self.last_power_draw = torch.zeros(num_envs, device=device, requires_grad=True)
+        self.spawn_positions = torch.zeros((num_envs, 3), device=device)
         
         # initialize imu readings
         self.imu_accel_bias_std = kwargs.pop("imu_accel_bias_std", 0.01)
@@ -477,7 +485,14 @@ class DroneParcour(WarpEnv):
         self.imu_accel_bias = torch.randn((num_envs, 3), device=device) * self.imu_accel_bias_std
         self.imu_gyro_bias = torch.randn((num_envs, 3), device=device) * self.imu_gyro_bias_std
         self.imu_accel_noise_std = kwargs.pop("imu_accel_noise_std", 0.03)
-        self.imu_gyro_noise_std = kwargs.pop("imu_gyro_noise_std", 0.02)        
+        self.imu_gyro_noise_std = kwargs.pop("imu_gyro_noise_std", 0.02)    
+
+        # initialize env offsets
+        if not self.no_env_offset:
+            x_min, x_max = self.arena_bounds[0, 0].item(), self.arena_bounds[0, 1].item()
+            y_min, y_max = self.arena_bounds[1, 0].item(), self.arena_bounds[1, 1].item()
+            z_min, z_max = self.arena_bounds[2, 0].item(), self.arena_bounds[2, 1].item()
+            self.env_offset = (x_max - x_min, y_max - y_min, z_max - z_min)
 
         # Now call super with only the parameters it expects
         super().__init__(
@@ -504,88 +519,143 @@ class DroneParcour(WarpEnv):
         if not self.has_static_obstacles:
             return
         
-        # Get arena bounds
+        # # Get arena bounds
+        # x_min, x_max = self.room_bounds[0, 0].item(), self.room_bounds[0, 1].item()
+        # y_min, y_max = self.room_bounds[1, 0].item(), self.room_bounds[1, 1].item()
+        # z_min, z_max = self.room_bounds[2, 0].item(), self.room_bounds[2, 1].item()
+
+        # wall_thickness = 0.1 
+        # wall_height = y_max - y_min
+        # ground_altiude = 0.0
+
+        # # Add 4 perimeter walls
+        # # North wall (positive Z)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
+        #     hx=(x_max - x_min)/2,
+        #     hy=wall_height/2,
+        #     hz=wall_thickness/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
+        
+        # # South wall (negative Z)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
+        #     hx=(x_max - x_min)/2,
+        #     hy=wall_height/2,
+        #     hz=wall_thickness/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
+        
+        # # East wall (positive X)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+        #     hx=wall_thickness/2,
+        #     hy=wall_height/2,
+        #     hz=(z_max - z_min)/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
+        
+        # # West wall (negative X)
+        # builder.add_shape_box(
+        #     -1,
+        #     pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
+        #     hx=wall_thickness/2,
+        #     hy=wall_height/2,
+        #     hz=(z_max - z_min)/2,
+        #     is_solid=True,
+        #     has_shape_collision=True,            
+        #     is_visible=True,
+        # )
+        
+        # # Generate structured maze with guaranteed connectivity
+        # walls = self.generate_connected_maze(x_min, x_max, z_min, z_max, wall_thickness)
+        
+        # # Add maze walls to the builder
+        # for wall in walls:
+        #     builder.add_shape_box(
+        #         -1,
+        #         pos=(wall['pos'][0], ground_altiude + wall_height/2, wall['pos'][2]),
+        #         hx=wall['size'][0]/2,
+        #         hy=wall_height/2,
+        #         hz=wall['size'][2]/2,
+        #         is_solid=True,
+        #         has_shape_collision=True,                    
+        #         is_visible=True,
+        #     )
+
+        # self.num_static_obstacles = 4 + len(walls)  # boundary walls + maze walls
+        self.spawn_racing_parcour(builder)
+
+    def spawn_racing_parcour(self, builder):
+        """Spawns a racing parcour with random obstacles."""
         x_min, x_max = self.room_bounds[0, 0].item(), self.room_bounds[0, 1].item()
         y_min, y_max = self.room_bounds[1, 0].item(), self.room_bounds[1, 1].item()
         z_min, z_max = self.room_bounds[2, 0].item(), self.room_bounds[2, 1].item()
+        
+        num_obstacles = self.num_static_obstacles
 
-        wall_thickness = 0.1 
-        wall_height = y_max - y_min
-        ground_altiude = 0.0
+        for _ in range(num_obstacles):
+            # Choose obstacle type
+            obstacle_type = random.choice(['box', 'capsule'])
+            
+            # Random position within the arena
+            pos_x = random.uniform(x_min, x_max)
+            pos_y = random.uniform(y_min, y_max)
+            pos_z = random.uniform(z_min, z_max)
+            
+            # Random orientation (yaw rotation around Y axis)
+            rot_angle = random.uniform(0, 2 * math.pi)
+            rot = wp.quat_rpy(0.0, rot_angle, 0.0)
 
-        # Add 4 perimeter walls
-        # North wall (positive Z)
-        builder.add_shape_box(
-            -1,
-            pos=(0.0, ground_altiude + wall_height/2, z_max + wall_thickness/2),
-            hx=(x_max - x_min)/2,
-            hy=wall_height/2,
-            hz=wall_thickness/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
-        
-        # South wall (negative Z)
-        builder.add_shape_box(
-            -1,
-            pos=(0.0, ground_altiude + wall_height/2, z_min - wall_thickness/2),
-            hx=(x_max - x_min)/2,
-            hy=wall_height/2,
-            hz=wall_thickness/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
-        
-        # East wall (positive X)
-        builder.add_shape_box(
-            -1,
-            pos=(x_max + wall_thickness/2, ground_altiude + wall_height/2, 0.0),
-            hx=wall_thickness/2,
-            hy=wall_height/2,
-            hz=(z_max - z_min)/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
-        
-        # West wall (negative X)
-        builder.add_shape_box(
-            -1,
-            pos=(x_min - wall_thickness/2, ground_altiude + wall_height/2, 0.0),
-            hx=wall_thickness/2,
-            hy=wall_height/2,
-            hz=(z_max - z_min)/2,
-            is_solid=True,
-            has_shape_collision=True,            
-            is_visible=True,
-        )
-        
-        # Generate structured maze with guaranteed connectivity
-        walls = self.generate_connected_maze(x_min, x_max, z_min, z_max, wall_thickness)
-        
-        # Add maze walls to the builder
-        for wall in walls:
-            builder.add_shape_box(
-                -1,
-                pos=(wall['pos'][0], ground_altiude + wall_height/2, wall['pos'][2]),
-                hx=wall['size'][0]/2,
-                hy=wall_height/2,
-                hz=wall['size'][2]/2,
-                is_solid=True,
-                has_shape_collision=True,                    
-                is_visible=True,
-            )
-
-        self.num_static_obstacles = 4 + len(walls)  # boundary walls + maze walls
+            if obstacle_type == 'box':
+                # Random size
+                hx = random.uniform(self.obstacle_min_size, self.obstacle_max_size)
+                hy = random.uniform(self.obstacle_min_size, self.obstacle_max_size)
+                hz = random.uniform(self.obstacle_min_size, self.obstacle_max_size)
+                builder.add_shape_box(
+                    -1,
+                    pos=(pos_x, pos_y, pos_z),
+                    rot=rot,
+                    hx=hx,
+                    hy=hy,
+                    hz=hz,
+                    is_solid=True,
+                    has_shape_collision=True,
+                    is_visible=True,
+                )
+            elif obstacle_type == 'capsule':
+                # Random size
+                radius = random.uniform(self.obstacle_min_size / 2, self.obstacle_max_size / 2)
+                half_height = random.uniform(self.obstacle_min_size, self.obstacle_max_size)
+                builder.add_shape_capsule(
+                    -1,
+                    pos=(pos_x, pos_y, pos_z),
+                    rot=rot,
+                    radius=radius,
+                    half_height=half_height,
+                    is_solid=True,
+                    has_shape_collision=True,
+                    is_visible=True,
+                )
+        self.num_static_obstacles = num_obstacles
+        self.has_static_obstacles = True  # Ensure the flag is set to True
 
     def generate_connected_maze(self, x_min, x_max, z_min, z_max, wall_thickness):
         """Generate a maze with guaranteed connectivity using one of several algorithms"""        
         
         # Choose maze generation method
         # maze_type = random.choice(['rooms_and_corridors', 'recursive_division', 'voronoi_rooms'])
-        maze_type = 'recursive_division'  # for now, just use rooms and corridors
+        maze_type = 'rooms_and_corridors'  # for now, just use rooms and corridors
 
         if maze_type == 'rooms_and_corridors':
             return self._generate_rooms_and_corridors(x_min, x_max, z_min, z_max, wall_thickness)
@@ -872,10 +942,23 @@ class DroneParcour(WarpEnv):
 
         model.control = control_with_user_act.__get__(model, model.__class__)
         return model
+    
+    def create_scene_interactive_elements(self, builder):        
+        # self.scene_data = warp.sim.import_usd.parse_usd(
+        #     "assets/apple.usda", 
+        #     builder, 
+        #     verbose=True                       
+        # )
+        return
 
     def create_articulation(self, builder):
-        """Create the drone as a rigid body with automatic mass calculation."""        
-        
+        # """Create the drone as a rigid body with automatic mass calculation."""        
+        # scene_data = warp.sim.import_usd.parse_usd(
+        #     "assets/table.usda", 
+        #     builder, 
+        #     verbose=True                       
+        # )
+
         # Create the drone as a single rigid body
         body = builder.add_body()
         
@@ -1099,6 +1182,8 @@ class DroneParcour(WarpEnv):
         self.indices_shape_with_collision = wp.array([i for i, x in enumerate(self.model.shape_shape_collision) if x], dtype=int, device=self.model.device)        
         self._collision_distances = wp.zeros([self.num_envs, len(self.indices_shape_with_collision)], dtype=wp.float32, device=self.model.device, requires_grad=True)
         
+        # random spawn points
+        self.randomize_init(torch.arange(self.num_envs, device=self.device))
             
     def setup_drone(self):
         """Setup drone parameters and cache computed values. Can be called to reset/randomize parameters."""
@@ -1296,7 +1381,58 @@ class DroneParcour(WarpEnv):
             mins = self.target_bounds[:, 0]  # [x_min, y_min, z_min]
             maxs = self.target_bounds[:, 1]  # [x_max, y_max, z_max]
             ranges = maxs - mins        # [x_range, y_range, z_range]
-            
+
+            target_pos_rand = mins + random_factors * ranges
+
+            indices_shape_with_collision = wp.array([i for i, x in enumerate(self.model.shape_shape_collision) if x], dtype=int, device=self.model.device)        
+            _collision_distances = wp.zeros([len(env_ids), len(indices_shape_with_collision)], dtype=wp.float32, device=self.model.device, requires_grad=True)
+            wp.launch(
+                collision_distance_kernel,
+                dim=(len(env_ids), len(indices_shape_with_collision)),
+                inputs=[
+                    wp.array(torch.cat((target_pos_rand, torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1)), dim=-1), dtype=wp.transform, device=self.model.device),  # target transforms
+                    indices_shape_with_collision,
+                    self.sim_view._drone_indices_wp,
+                    self.model.shape_transform,
+                    self.model.shape_geo,  
+                    self.model.shape_body,                                            
+                ],
+                outputs=[_collision_distances],
+                device=self.model.device
+            )               
+            min_distances, _ = torch.min(wp.to_torch(_collision_distances), dim=1)
+
+            mask_need_respawn = min_distances < self.arm_specs[2] / 2.0 + 0.2
+
+            while torch.any(mask_need_respawn):
+                # update spawn positions of problematic poses
+                num_to_respawn = torch.sum(mask_need_respawn).item()
+                # print(f"Respawning {num_to_respawn} targets...")     
+                random_factors = torch.rand([num_to_respawn, 3], device=self.device)
+                target_pos_rand[torch.where(mask_need_respawn)[0], :] = mins + random_factors * ranges
+                
+                candidate_transforms = wp.array(torch.cat((target_pos_rand, torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1)), dim=-1), dtype=wp.transform, device=self.model.device)
+                
+                wp.launch(
+                    collision_distance_kernel,
+                    dim=(len(env_ids), len(indices_shape_with_collision)),
+                    inputs=[
+                        candidate_transforms,  # target transforms
+                        indices_shape_with_collision,
+                        self.sim_view._drone_indices_wp,
+                        self.model.shape_transform,
+                        self.model.shape_geo,  
+                        self.model.shape_body,                                            
+                    ],
+                    outputs=[_collision_distances],
+                    device=self.model.device
+                )               
+                min_distances_respawn, _ = torch.min(wp.to_torch(_collision_distances), dim=1)           
+
+                # Update mask for next iteration                
+                mask_need_respawn = min_distances_respawn < self.arm_specs[2]  
+
+
             # generate random target attitudes            
             randomized_target_orientation = self.target_attitude_euler_deg.repeat(len(env_ids), 1) / 180.0 * math.pi
             randomized_target_orientation += torch.randn_like(randomized_target_orientation) * self.three_sigma_target_attitude_deg / 3.0 / 180.0 * math.pi
@@ -1309,41 +1445,41 @@ class DroneParcour(WarpEnv):
             # Combine rotations: yaw * pitch * roll (Z-Y-X convention)
             target_attitudes = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
             
-            self.target_body_q[env_ids, 0:3] = mins + random_factors * ranges
+            self.target_body_q[env_ids, 0:3] = target_pos_rand
             self.target_body_q[env_ids, 3:7] = target_attitudes
 
             # Set target velocities
             self.target_body_qd[env_ids, 3:6] = self.target_lin_vel.repeat(len(env_ids), 1) + torch.randn_like(self.target_lin_vel) * self.three_sigma_target_lin_vel / 3.0
             self.target_body_qd[env_ids, :3] = self.target_ang_vel.repeat(len(env_ids), 1) + torch.randn_like(self.target_ang_vel) * self.three_sigma_target_ang_vel / 3.0
 
-    def reset_static_obstacles(self):
-        with torch.no_grad():
-            # Find obstacle shape indices (shapes that are not drone bodies)
-            all_shapes = self.indices_shape_with_collision.numpy()
-            drone_shapes = self.sim_view._drone_indices_wp.numpy()
-            obstacle_mask = ~np.isin(all_shapes, drone_shapes)
-            obstacle_indices = all_shapes[obstacle_mask]
-            N_obs = len(obstacle_indices)
+    # def reset_static_obstacles(self):
+    #     with torch.no_grad():
+    #         # Find obstacle shape indices (shapes that are not drone bodies)
+    #         all_shapes = self.indices_shape_with_collision.numpy()
+    #         drone_shapes = self.sim_view._drone_indices_wp.numpy()
+    #         obstacle_mask = ~np.isin(all_shapes, drone_shapes)
+    #         obstacle_indices = all_shapes[obstacle_mask]
+    #         N_obs = len(obstacle_indices)
             
-            # Generate random positions within scaled room bounds
-            random_factors = torch.rand(N_obs, 3, device=self.device)
-            mins = self.room_bounds[:, 0]  # [x_min, y_min, z_min]
-            maxs = self.room_bounds[:, 1]  # [x_max, y_max, z_max]
-            ranges = maxs - mins        # [x_range, y_range, z_range]
+    #         # Generate random positions within scaled room bounds
+    #         random_factors = torch.rand(N_obs, 3, device=self.device)
+    #         mins = self.room_bounds[:, 0]  # [x_min, y_min, z_min]
+    #         maxs = self.room_bounds[:, 1]  # [x_max, y_max, z_max]
+    #         ranges = maxs - mins        # [x_range, y_range, z_range]
 
-            # generate random target attitudes            
-            randomized_orientation = torch.randn(N_obs, device=self.device) * math.pi
+    #         # generate random target attitudes            
+    #         randomized_orientation = torch.randn(N_obs, device=self.device) * math.pi
 
-            # Create quaternions for each rotation axis
-            quat_azimuth = quat_from_angle_axis(randomized_orientation, torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(N_obs, -1))
+    #         # Create quaternions for each rotation axis
+    #         quat_azimuth = quat_from_angle_axis(randomized_orientation, torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(N_obs, -1))
             
-            cache_poses = wp.to_torch(self.model.shape_transform)
+    #         cache_poses = wp.to_torch(self.model.shape_transform)
 
-            for i, s in enumerate(obstacle_indices):
-                cache_poses[s, :3] = (mins + ranges * random_factors[i])*0.0
-                cache_poses[s, 3:7] = quat_azimuth[i]
+    #         for i, s in enumerate(obstacle_indices):
+    #             cache_poses[s, :3] = (mins + ranges * random_factors[i])*0.0
+    #             cache_poses[s, 3:7] = quat_azimuth[i]
                         
-            self.model.shape_transform = wp.from_torch(cache_poses, dtype=wp.transform)
+    #         self.model.shape_transform = wp.from_torch(cache_poses, dtype=wp.transform)
 
     @torch.no_grad()
     def randomize_init(self, env_ids):        
@@ -1375,6 +1511,8 @@ class DroneParcour(WarpEnv):
         spawn_maxs = self.spawn_bounds[:, 1]  # [x_max, y_max, z_max]
         spawn_ranges = spawn_maxs - spawn_mins
         body_q[env_ids, 0:3] = spawn_mins + torch.rand(size=(N, 3), device=self.device) * spawn_ranges
+
+        self.spawn_positions[env_ids,:] = body_q[env_ids, 0:3].clone().detach()
 
         ##  ================== sample initial velocity ========================
         # linear random velocity
@@ -1424,8 +1562,8 @@ class DroneParcour(WarpEnv):
         gain_p_ang = 3.0     
         gain_p_lin = 10.0           
         
-        body_qdd_cmd_W[:, 0:3] = gain_p_ang * (body_qd_desired_W[:, 0:3] - body_qd[:, 0:3]) # control input to control angular velocity
-        body_qdd_cmd_W[:, 3:6] = gain_p_lin * (body_qd_desired_W[:, 3:6] - body_qd[:, 3:6]) # control input to control linear velocity
+        body_qdd_cmd_W[:, 0:3] = gain_p_ang * (body_qd_desired_W[:, 0:3] - body_qd[:, 0:3]) * self.frame_dt # control input to control angular velocity
+        body_qdd_cmd_W[:, 3:6] = gain_p_lin * (body_qd_desired_W[:, 3:6] - body_qd[:, 3:6]) * self.frame_dt # control input to control linear velocity
 
         # Get mass and inertia tensors (convert to torch first, then index)
         all_masses = wp.to_torch(self.model.body_mass)  # Convert full array to torch
@@ -1545,7 +1683,8 @@ class DroneParcour(WarpEnv):
 
         # Compute IMU readings (accelerometer and gyroscope)
         drone_idx = wp.to_torch(self.sim_view._drone_indices_wp)
-        body_f = wp.to_torch(self.state_0_bwd.body_f)[drone_idx]
+        # body_f = wp.to_torch(self.state_0_bwd.body_f)[drone_idx]
+        body_f = wp.to_torch(self.state_0.body_f)[drone_idx]
         body_mass = wp.to_torch(self.model.body_mass)[drone_idx]
         linAcc_body_B, angRates_body_B = self.compute_imu_readings(body_q, body_qd, body_f, body_mass)
 
@@ -1562,6 +1701,9 @@ class DroneParcour(WarpEnv):
 
         # data hygiene
         nan_mask = torch.isnan(obs)
+        if torch.any(nan_mask):
+            print("NaN detected in observations")
+            print(obs)
         obs = torch.where(nan_mask, torch.randn_like(obs) * 0.1, obs)
         obs = torch.clamp(obs, -2e1, 2e1)      
         
@@ -1624,7 +1766,10 @@ class DroneParcour(WarpEnv):
         how_much_outside, _ = torch.max(torch.cat((dist_to_min, dist_to_max), dim=1), dim=1)
         outside_penalty = -1.0 * torch.nn.functional.softplus(how_much_outside + start_penalizing_before_arenabounds, beta=beta_softplus_arenabounds)
 
-        action_penalty = -0.01 * torch.sum(self.last_actor_cmd[:, :3]**2, dim=-1) + -0.1 * torch.abs(self.last_actor_cmd[:, 3])
+        action_penalty = (
+            -0.01 * torch.sum(self.last_actor_cmd[:, :3]**2, dim=-1) + # lin vel cmd pealty
+            -0.2 * torch.abs(self.last_actor_cmd[:, 3]) # yaw rate cmd penalty
+        )
 
         # ===================== Target =========================                   
         target_proximity_reward = 1.0 / (1.0 + pos_err_norm)   
@@ -1641,6 +1786,11 @@ class DroneParcour(WarpEnv):
         
         orientation_reward = 0.1 * distance_gate * (1.0 + (body_up_axis[:,None,:] @ target_up_axis[:,:,None]).squeeze())
 
+        # ======================= Exploration ===============================
+        dist_from_start = torch.norm(pos - self.spawn_positions, dim=1)
+        dist_start_goal = torch.norm(self.target_body_q[:, :3] - self.spawn_positions, dim=1)
+        exploration_reward = 0.2 * (1.0 - 1.0 / (1.0 + 10.0 * dist_from_start / (dist_start_goal + 1e-6)))
+
         # ====================== Angular Speed Barrier =========================
         ang_speed = torch.linalg.norm(body_qd[:, :3], dim=1)
         max_ang_speed = 1.0  # rad/s
@@ -1649,7 +1799,7 @@ class DroneParcour(WarpEnv):
 
         # ===================== Collision Barrier =========================        
         max_collision_penalty = 1.0
-        steepness = 2.0
+        steepness = 4.0
         if self.use_collision_distances:
             closest_collision_distance = wp.to_torch(self._collision_distances).min(dim=1)[0] 
             collision_penalty = -max_collision_penalty / (1.0 + (closest_collision_distance * steepness)**2)
@@ -1661,10 +1811,11 @@ class DroneParcour(WarpEnv):
         reward = (
             # -pos_err_norm * 1.0 
             + target_proximity_reward
+            + exploration_reward
             # + target_rate_mismatch_penalty     
             # + orientation_reward 
-            + outside_penalty             
-            + collision_penalty
+            # + outside_penalty             
+            # + collision_penalty
             # + action_penalty
             # + orientation_penalty
             # + progress_reward
@@ -1672,8 +1823,12 @@ class DroneParcour(WarpEnv):
 
         # data hygiene
         nan_mask = torch.isnan(reward)
-        reward = torch.where(nan_mask, torch.randn_like(reward) * 0.1, reward)
-        # reward = torch.clamp(reward, -1e2, 1e2)        
+        if torch.any(nan_mask):
+            print("NaN detected in reward")
+            print(nan_mask)
+            reward = torch.where(nan_mask, torch.randn_like(reward) * 1.0, reward)
+
+        reward = torch.clamp(reward, -1e5, 1e5)
 
         # Truncation/termination (ant-like structure, but with sensible failsafes)
         reset_buf, progress_buf = self.reset_buf, self.progress_buf

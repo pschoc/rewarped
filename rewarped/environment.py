@@ -101,8 +101,8 @@ def compute_up_vector(up_axis):
 class Environment:
     sim_name: str = "Environment"
 
-    frame_dt = 1.0 / 30.0
-    episode_duration = 10.0  # seconds
+    # frame_dt = 1.0 / 30.0
+    # episode_duration = 10.0  # seconds
 
     integrator_type: IntegratorType = IntegratorType.EULER
 
@@ -207,7 +207,9 @@ class Environment:
         if not self.model.device.is_cuda:
             self.use_graph_capture = False
 
-        self.sim_substeps, self.integrator_settings, self.integrator = self.create_integrator(self.model)
+        sim_substeps, self.integrator_settings, self.integrator = self.create_integrator(self.model)
+        if self.sim_substeps is None:
+            self.sim_substeps = sim_substeps
 
         self.episode_frames = int(self.episode_duration / self.frame_dt)
         self.sim_dt = self.frame_dt / self.sim_substeps
@@ -293,7 +295,11 @@ class Environment:
 
     def create_env(self, builder):
         self.create_articulation(builder)
-
+        self.create_scene_interactive_elements(builder)
+    
+    def create_scene_interactive_elements(self, builder):
+        raise NotImplementedError
+    
     def create_articulation(self, builder):
         raise NotImplementedError
 
