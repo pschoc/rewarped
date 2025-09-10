@@ -206,71 +206,6 @@ def collision_distance_kernel(
     
     depths[env_id, obs_id] = d
 
-
-@wp.kernel
-def render_depth_kernel(
-    body_q: wp.array(dtype=wp.transform),
-    drone_body_index: wp.array(dtype=int),
-    shape_X_bs: wp.array(dtype=wp.transform),
-    geo: wp.sim.ModelShapeGeometry,
-    obstacle_ids: wp.array(dtype=int),    
-    cam_dirs_local: wp.array(dtype=wp.vec3),
-    cam_pos_local: wp.vec3,        
-    min_depth: float,
-    max_depth: float,
-    depths: wp.array(dtype=float, ndim=2),  # [num_envs, width*height]
-):
-    env_id, pix = wp.tid()
-
-    # fetch body transform for this env
-    body_idx = drone_body_index[env_id]
-    tf_b = body_q[body_idx]
-
-    # camera origin and ray direction in world
-    ro = wp.transform_point(tf_b, cam_pos_local)
-    rd = wp.normalize(wp.transform_vector(tf_b, cam_dirs_local[pix]))
-
-    # sphere tracing
-    t = min_depth
-    hit_t = max_depth
-
-    # loop bounds
-    MAX_STEPS = 64
-    EPS_HIT = 1.0e-3
-
-    # number of obstacle shapes for this env
-    # obstacle_ids is padded with -1 for invalid slots
-    for step in range(MAX_STEPS):
-        if t > max_depth:
-            break
-
-        p = ro + rd * t
-
-        # evaluate min signed distance over all shapes (must be dynamic in a dynamic loop)
-        d_min = float(1.0e6)
-
-        # iterate shapes
-        for s in range(len(obstacle_ids)):
-            shape_index = obstacle_ids[s]
-            if shape_index < 0:
-                continue
-            d = sdf_shape_distance_world(p, shape_index, shape_X_bs, geo)            
-            d = wp.max(d, 0.0)
-            d_min = wp.min(d_min, d)
-
-        if d_min < EPS_HIT:
-            hit_t = t
-            break
-
-        # conservative step
-        if d_min > 0.0:
-            t = t + d_min
-        else:
-            # guard against zero step
-            t = t + 1.0e-3
-
-    depths[env_id, pix] = wp.clamp(hit_t, min_depth, max_depth)
-
 @wp.kernel
 def apply_drone_forces_kernel(
     body_q: wp.array(dtype=wp.transform),
@@ -1949,8 +1884,6 @@ class DroneParcour(WarpEnv):
 
         if len(self.indices_shape_with_collision) == 0:
             return
-
-        # kernel = render_depth_raytrace_kernel if getattr(self, "use_bvh_depth", False) else render_depth_kernel
 
         wp.launch(
             render_depth_raytrace_kernel,
