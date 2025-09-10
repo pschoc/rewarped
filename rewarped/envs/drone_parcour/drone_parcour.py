@@ -343,6 +343,335 @@ def apply_drone_forces_kernel(
     
     body_f[body_idx] = updated_forces_torques_world
 
+# --- Analytic helpers (expand as needed) ---
+
+@wp.func
+def ray_sphere(ro: wp.vec3, rd: wp.vec3, center: wp.vec3, radius: float, t_max: float):
+    oc = ro - center
+    b = wp.dot(oc, rd)
+    c = wp.dot(oc, oc) - radius * radius
+    disc = b * b - c
+    if disc < 0.0:
+        return t_max
+    s = wp.sqrt(disc)
+    t = -b - s
+    if t > 0.0 and t < t_max:
+        return t
+    t = -b + s
+    if t > 0.0 and t < t_max:
+        return t
+    return t_max
+
+@wp.func
+def ray_plane(ro: wp.vec3, rd: wp.vec3, n: wp.vec3, d: float, t_max: float):
+    # Plane eq: dot(n, x) = d (n assumed normalized)
+    denom = wp.dot(n, rd)
+    if wp.abs(denom) < 1.0e-6:
+        return t_max
+    t = (d - wp.dot(n, ro)) / denom
+    if t > 0.0 and t < t_max:
+        return t
+    return t_max
+
+@wp.func
+def ray_box(ro: wp.vec3, rd: wp.vec3, hx: float, hy: float, hz: float, t_max: float):
+    # Axis-aligned in local space: |x|<=hx, |y|<=hy, |z|<=hz
+    inv = wp.vec3(
+        1.0/rd[0] if wp.abs(rd[0]) > 1e-9 else 1e18,
+        1.0/rd[1] if wp.abs(rd[1]) > 1e-9 else 1e18,
+        1.0/rd[2] if wp.abs(rd[2]) > 1e-9 else 1e18
+    )
+    t1 = (-hx - ro[0]) * inv[0]
+    t2 = ( hx - ro[0]) * inv[0]
+    tmin = wp.min(t1, t2)
+    tmaxv = wp.max(t1, t2)
+
+    t1 = (-hy - ro[1]) * inv[1]
+    t2 = ( hy - ro[1]) * inv[1]
+    tmin = wp.max(tmin, wp.min(t1, t2))
+    tmaxv = wp.min(tmaxv, wp.max(t1, t2))
+
+    t1 = (-hz - ro[2]) * inv[2]
+    t2 = ( hz - ro[2]) * inv[2]
+    tmin = wp.max(tmin, wp.min(t1, t2))
+    tmaxv = wp.min(tmaxv, wp.max(t1, t2))
+
+    if tmaxv >= tmin and tmaxv > 0.0:
+        t_hit = tmin
+        if t_hit < 0.0:
+            t_hit = tmaxv  # inside box
+        if t_hit > 0.0 and t_hit < t_max:
+            return t_hit
+    return t_max
+
+@wp.func
+def ray_cylinder_y(ro: wp.vec3, rd: wp.vec3, radius: float, half_height: float, t_max: float):
+    # Infinite cylinder along Y: x^2+z^2= r^2
+    a = rd[0]*rd[0] + rd[2]*rd[2]
+    if a < 1e-12:
+        # Ray parallel to axis -> test caps only
+        if wp.abs(rd[1]) < 1e-9:
+            return t_max
+        # intersect planes y=±h
+        # Check negative plane
+        t = (-half_height - ro[1]) / rd[1]
+        if t > 0.0 and t < t_max:
+            p = ro + rd * t
+            if p[0]*p[0] + p[2]*p[2] <= radius*radius + 1e-6:
+                return t
+        # Check positive plane
+        t = (half_height - ro[1]) / rd[1]
+        if t > 0.0 and t < t_max:
+            p = ro + rd * t
+            if p[0]*p[0] + p[2]*p[2] <= radius*radius + 1e-6:
+                return t
+        return t_max
+    b = ro[0]*rd[0] + ro[2]*rd[2]
+    c = ro[0]*ro[0] + ro[2]*ro[2] - radius*radius
+    disc = b*b - a*c
+    if disc >= 0.0:
+        sdisc = wp.sqrt(disc)
+        inva = 1.0/a
+        t0 = (-b - sdisc)*inva
+        t1 = (-b + sdisc)*inva
+        if t0 > t1:
+            tmp = t0; t0 = t1; t1 = tmp
+        # first viable side hit with y in bounds
+        if t0 > 0.0 and t0 < t_max:
+            y = ro[1] + rd[1]*t0
+            if y >= -half_height-1e-6 and y <= half_height+1e-6:
+                return t0
+        if t1 > 0.0 and t1 < t_max:
+            y = ro[1] + rd[1]*t1
+            if y >= -half_height-1e-6 and y <= half_height+1e-6:
+                return t1
+    # side failed -> test caps
+    if wp.abs(rd[1]) > 1e-9:
+        # Check negative cap
+        t = (-half_height - ro[1]) / rd[1]
+        if t > 0.0 and t < t_max:
+            p = ro + rd * t
+            if p[0]*p[0] + p[2]*p[2] <= radius*radius + 1e-6:
+                return t
+        # Check positive cap
+        t = (half_height - ro[1]) / rd[1]
+        if t > 0.0 and t < t_max:
+            p = ro + rd * t
+            if p[0]*p[0] + p[2]*p[2] <= radius*radius + 1e-6:
+                return t
+    return t_max
+
+@wp.func
+def ray_capsule_y(ro: wp.vec3, rd: wp.vec3, radius: float, half_height: float, t_max: float):
+    # Try cylinder part
+    t_hit = ray_cylinder_y(ro, rd, radius, half_height, t_max)
+    if t_hit < t_max:
+        return t_hit
+    # Sphere ends centers
+    c1 = wp.vec3(0.0,  half_height, 0.0)
+    c0 = wp.vec3(0.0, -half_height, 0.0)
+    t_hit = ray_sphere(ro, rd, c0, radius, t_hit)
+    t_hit = ray_sphere(ro, rd, c1, radius, t_hit)
+    return t_hit
+
+@wp.func
+def ray_cone_y(ro: wp.vec3, rd: wp.vec3, radius: float, half_height: float, t_max: float):
+    # Right cone along +Y with apex at +h, base at -h (Warp cone SDF uses that convention).
+    # Equation (scaled): (r/h)^2 * (y-h)^2 = x^2+z^2, y in [-h,h]
+    # Derivation: treat cone side; approximate; inside/backface culled.
+    k = radius / (2.0*half_height)  # slope (radius over height span (2h))
+    # Shift so apex at y=+h
+    ro_y = ro[1] - half_height
+    rd_y = rd[1]
+    k2 = k*k
+    a = rd[0]*rd[0] + rd[2]*rd[2] - k2 * rd_y*rd_y
+    b = ro[0]*rd[0] + ro[2]*rd[2] - k2 * ro_y*rd_y
+    c = ro[0]*ro[0] + ro[2]*ro[2] - k2 * ro_y*ro_y
+    if wp.abs(a) < 1e-12:
+        return t_max
+    disc = b*b - a*c
+    if disc < 0.0:
+        return t_max
+    sdisc = wp.sqrt(disc)
+    t0 = (-b - sdisc)/a
+    t1 = (-b + sdisc)/a
+    if t0 > t1:
+        tmp = t0; t0 = t1; t1 = tmp
+    if t0 > 0.0 and t0 < t_max:
+        y = ro[1] + rd[1]*t0
+        if y >= -half_height-1e-6 and y <= half_height+1e-6:
+            return t0
+    if t1 > 0.0 and t1 < t_max:
+        y = ro[1] + rd[1]*t1
+        if y >= -half_height-1e-6 and y <= half_height+1e-6:
+            return t1
+    # Base disk at y=-h
+    if wp.abs(rd[1]) > 1e-9:
+        t = (-half_height - ro[1]) / rd[1]
+        if t > 0.0 and t < t_max:
+            p = ro + rd * t
+            if p[0]*p[0] + p[2]*p[2] <= radius*radius + 1e-6:
+                return t
+    return t_max
+
+@wp.func
+def ray_sdf_fallback(ro: wp.vec3,
+                     rd: wp.vec3,
+                     shape_index: int,
+                     shape_X_bs: wp.array(dtype=wp.transform),
+                     geo: wp.sim.ModelShapeGeometry,
+                     min_t: float,
+                     max_t: float) -> float:
+    # Simple sphere tracing fallback for SDF shapes
+    t = min_t
+    for _ in range(48):
+        if t > max_t:
+            break
+        p = ro + rd * t
+        d = sdf_single_step(p, shape_index, shape_X_bs, geo)
+        if d < 1.0e-3:
+            return t
+        t += wp.max(d, 1.0e-3)
+    return max_t
+
+@wp.func
+def sdf_single_step(p: wp.vec3,
+                    shape_index: int,
+                    shape_X_bs: wp.array(dtype=wp.transform),
+                    geo: wp.sim.ModelShapeGeometry) -> float:
+    # Single evaluation of distance (no marching) for non-mesh primitives – conservative.
+    X_bs = shape_X_bs[shape_index]
+    x_local = wp.transform_point(wp.transform_inverse(X_bs), p)
+    gt = geo.type[shape_index]
+    gs = geo.scale[shape_index]
+    if gt == wp.sim.GEO_SPHERE:
+        return wp.max(sphere_sdf(wp.vec3(), gs[0], x_local), 0.0)
+    elif gt == wp.sim.GEO_BOX:
+        return wp.max(box_sdf(gs, x_local), 0.0)
+    elif gt == wp.sim.GEO_CAPSULE:
+        return wp.max(capsule_sdf(gs[0], gs[1], x_local), 0.0)
+    elif gt == wp.sim.GEO_CYLINDER:
+        return wp.max(cylinder_sdf(gs[0], gs[1], x_local), 0.0)
+    elif gt == wp.sim.GEO_CONE:
+        return wp.max(cone_sdf(gs[0], gs[1], x_local), 0.0)
+    elif gt == wp.sim.GEO_PLANE:
+        return wp.max(plane_sdf(gs[0], gs[1], x_local), 0.0)
+    else:
+        return 1.0e6
+
+
+@wp.kernel
+def render_depth_raytrace_kernel(
+    body_q: wp.array(dtype=wp.transform),
+    drone_body_index: wp.array(dtype=int),
+    object_body_idx: wp.array(dtype=int),
+    shape_X_bs: wp.array(dtype=wp.transform),
+    geo: wp.sim.ModelShapeGeometry,
+    obstacle_ids: wp.array(dtype=int),
+    cam_dirs_local: wp.array(dtype=wp.vec3),
+    cam_pos_local: wp.vec3,
+    min_depth: float,
+    max_depth: float,
+    depths: wp.array(dtype=float, ndim=2),
+):
+    env_id, pix = wp.tid()
+
+    body_idx = drone_body_index[env_id]
+    tf_b = body_q[body_idx]
+
+    ro = wp.transform_point(tf_b, cam_pos_local)
+    rd = wp.normalize(wp.transform_vector(tf_b, cam_dirs_local[pix]))
+
+    t_hit = max_depth
+
+    color = wp.vec3(0.0, 0.0, 0.0)
+
+    # Iterate shapes
+    for s in range(len(obstacle_ids)):
+        shape_index = obstacle_ids[s]        
+        if shape_index < 0 or shape_index == body_idx:
+            continue
+
+        gt = geo.type[shape_index]
+        scale = geo.scale[shape_index]
+
+        X_bs = shape_X_bs[shape_index]
+        b = object_body_idx[shape_index]
+        if b >= 0:
+            X_wb = body_q[b]
+            X_ws = wp.transform_multiply(X_wb, X_bs)
+        else:
+            X_ws = X_bs
+
+        if gt == wp.sim.GEO_MESH:             
+            uni_scale = scale[0]
+            inv = wp.transform_inverse(X_ws)
+            ro_local = wp.transform_point(inv, ro) / uni_scale
+            rd_local = wp.normalize(wp.transform_vector(inv, rd))
+            max_t_local = t_hit / uni_scale
+            q = wp.mesh_query_ray(geo.source[shape_index], ro_local, rd_local, max_t_local)
+            if q.result:
+                t_world = q.t * uni_scale
+                if t_world < t_hit and t_world >= min_depth:
+                    t_hit = t_world
+
+        elif gt == wp.sim.GEO_SPHERE:
+            center = wp.transform_get_translation(X_ws)            
+            t_candidate = ray_sphere(ro, rd, center, scale[0], t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+        elif gt == wp.sim.GEO_BOX:
+            inv = wp.transform_inverse(X_ws)
+            ro_l = wp.transform_point(inv, ro)
+            rd_l = wp.transform_vector(inv, rd)
+            t_candidate = ray_box(ro_l, rd_l, scale[0], scale[1], scale[2], t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+        elif gt == wp.sim.GEO_CAPSULE:
+            inv = wp.transform_inverse(X_ws)
+            ro_l = wp.transform_point(inv, ro)
+            rd_l = wp.transform_vector(inv, rd)
+            t_candidate = ray_capsule_y(ro_l, rd_l, scale[0], scale[1], t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+        elif gt == wp.sim.GEO_CYLINDER:
+            inv = wp.transform_inverse(X_ws)
+            ro_l = wp.transform_point(inv, ro)
+            rd_l = wp.transform_vector(inv, rd)
+            scale = geo.scale[shape_index]   # (radius, half_height, _)
+            t_candidate = ray_cylinder_y(ro_l, rd_l, scale[0], scale[1], t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+        elif gt == wp.sim.GEO_CONE:
+            inv = wp.transform_inverse(X_ws)
+            ro_l = wp.transform_point(inv, ro)
+            rd_l = wp.transform_vector(inv, rd)
+            scale = geo.scale[shape_index]   # (radius, half_height, _)
+            t_candidate = ray_cone_y(ro_l, rd_l, scale[0], scale[1], t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+        elif gt == wp.sim.GEO_SDF:
+            # Fallback sphere tracing on SDF volume
+            t_candidate = ray_sdf_fallback(ro, rd, shape_index, shape_X_bs, geo, min_depth, t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+        elif gt == wp.sim.GEO_PLANE:
+            n_local = wp.vec3(0.0, 1.0, 0.0)
+            n_world = wp.normalize(wp.transform_vector(X_ws, n_local))
+            p_world = wp.transform_get_translation(X_ws)
+            d = wp.dot(n_world, p_world)
+            t_candidate = ray_plane(ro, rd, n_world, d, t_hit)
+            if t_candidate < t_hit and t_candidate >= min_depth:
+                t_hit = t_candidate
+
+    depths[env_id, pix] = wp.clamp(t_hit, min_depth, max_depth)
+
 class DroneParcour(WarpEnv):
     sim_name = "DroneParcour"    
 
@@ -1617,25 +1946,30 @@ class DroneParcour(WarpEnv):
     def compute_depth_observations(self, model, state):
         if not self.use_depth_observations:
             return
-            
-        if self.use_depth_observations and len(self.indices_shape_with_collision) > 0:        
-            wp.launch(
-                render_depth_kernel,
-                dim=(self.num_envs, self.cam_width * self.cam_height),
-                inputs=[
-                    state.body_q,
-                    self.sim_view._drone_indices_wp,
-                    model.shape_transform,
-                    model.shape_geo,
-                    self.indices_shape_with_collision,                    
-                    self._cam_dirs_local_wp,
-                    self._cam_pos_local_wp,                    
-                    float(self.cam_min_depth),
-                    float(self.cam_max_depth),
-                ],
-                outputs=[self._cam_depths_wp],
-                device=model.device,
-            )   
+
+        if len(self.indices_shape_with_collision) == 0:
+            return
+
+        # kernel = render_depth_raytrace_kernel if getattr(self, "use_bvh_depth", False) else render_depth_kernel
+
+        wp.launch(
+            render_depth_raytrace_kernel,
+            dim=(self.num_envs, self.cam_width * self.cam_height),
+            inputs=[
+                state.body_q,
+                self.sim_view._drone_indices_wp,
+                model.shape_body,
+                model.shape_transform,
+                model.shape_geo,
+                self.indices_shape_with_collision,
+                self._cam_dirs_local_wp,
+                self._cam_pos_local_wp,
+                float(self.cam_min_depth),
+                float(self.cam_max_depth),
+            ],
+            outputs=[self._cam_depths_wp],
+            device=model.device,
+        )   
 
     def compute_collision_distances(self, model, state):
         """Compute collision costs between drones and obstacles using SDF with graph capture"""

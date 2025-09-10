@@ -295,7 +295,7 @@ class Environment:
 
     def create_env(self, builder):        
         self.create_articulation(builder)
-        self.create_scene_interactive_elements(builder)   
+        self.create_scene_interactive_elements(builder)
                   
         print("done create env")   
     
