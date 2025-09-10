@@ -18,74 +18,75 @@ import random
 class SimulationView:
     """View class to access drone and obstacle bodies from the full simulation state"""
     
-    def __init__(self, model, num_envs, num_mobile_obstacles):
+    def __init__(self, model, num_envs):
         self.model = model
         self.device = model.device
         self.num_envs = num_envs
-        self.num_mobile_obstacles = num_mobile_obstacles # currently all only shapes        
 
-        # Body indices: obstacles come first, then drones
-        self.obstacle_indices = list(range(num_mobile_obstacles))
-        self.drone_indices = list(range(num_mobile_obstacles, num_mobile_obstacles + num_envs))
-        
+        # Body indices: [drone, object, object, ..., object]
+        self.drone_indices = list(range(0,1))
+
+        self.num_mobile_obstacles = model.body_count - 1
+        self.obstacle_indices = list(range(1, 1 + self.num_mobile_obstacles))
+
         # Create warp arrays for efficient GPU access
-        self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if num_mobile_obstacles > 0 else None
+        self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if self.num_mobile_obstacles > 0 else None
         self._drone_indices_wp = wp.array(self.drone_indices, dtype=int, device=self.device)        
         
     def get_drone_positions(self, state):
         """Get drone positions from full state"""
-        return state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3]
-    
+        return state.body_q[self.drone_indices, :3]
+
     def get_drone_orientations(self, state):
         """Get drone orientations from full state"""
-        return state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:7]
-    
+        return state.body_q[self.drone_indices, 3:7]
+
     def get_drone_velocities(self, state):
         """Get drone linear velocities from full state"""
-        return state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:6]
-    
+        return state.body_qd[self.drone_indices, 3:6]
+
     def get_drone_angular_velocities(self, state):
         """Get drone angular velocities from full state"""
-        return state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3]
-    
+        return state.body_qd[self.drone_indices, :3]
+
     def get_drone_states(self, state):
         """Get full drone body_q and body_qd"""
-        body_q = state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
-        body_qd = state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
+        body_q = state.body_q[self.drone_indices]
+        body_qd = state.body_qd[self.drone_indices]
         return body_q, body_qd
     
     def get_drone_force(self, state):
         """Get full drone body_q and body_qd"""
-        body_f = state.body_f[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs]
+        body_f = state.body_f[self.drone_indices]
         return body_f
     
     def set_drone_positions(self, state, positions):
         """Set drone positions in full state"""
-        state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3] = positions
+        state.body_q[self.drone_indices, :3] = positions
     
     def set_drone_orientations(self, state, orientations):
         """Set drone orientations in full state"""
-        state.body_q[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:7] = orientations
-    
+        state.body_q[self.drone_indices, 3:7] = orientations
+
     def set_drone_velocities(self, state, velocities):
         """Set drone linear velocities in full state"""
-        state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, 3:6] = velocities
-    
+        state.body_qd[self.drone_indices, 3:6] = velocities
+
     def set_drone_angular_velocities(self, state, angular_velocities):
         """Set drone angular velocities in full state"""
-        state.body_qd[self.num_mobile_obstacles:self.num_mobile_obstacles + self.num_envs, :3] = angular_velocities
-    
+        state.body_qd[self.drone_indices, :3] = angular_velocities
+
     def get_obstacle_positions(self, state):
         """Get obstacle positions from full state"""
         if self.num_mobile_obstacles == 0:
             return None
-        return state.body_q[:self.num_mobile_obstacles, :3]
-    
+        return state.body_q[self.obstacle_indices, :3]
+
     def get_obstacle_orientations(self, state):
         """Get obstacle orientations from full state"""
         if self.num_mobile_obstacles == 0:
             return None
-        return state.body_q[:self.num_mobile_obstacles, 3:7]
+        return state.body_q[self.obstacle_indices, 3:7]
 
 
 class Propeller:
@@ -944,23 +945,27 @@ class DroneParcour(WarpEnv):
         return model
     
     def create_scene_interactive_elements(self, builder):        
-        # self.scene_data = warp.sim.import_usd.parse_usd(
-        #     "assets/apple.usda", 
-        #     builder, 
-        #     verbose=True                       
-        # )
-        return
+        warp.sim.import_usd.parse_usd(
+            "assets/manipulation_scene.usd", 
+            builder, 
+            verbose=True,
+            invert_rotations=True, # why the fuck do we need this? It appears like the tfs are reversed (either from omniverse usd composer or applied in reverse in the warp mesh generator)         
+            contact_ke=1e4,
+            contact_kd=1e3,
+            contact_kf=1e2,
+            contact_ka=0.0,
+            contact_mu=0.6,
+            contact_restitution=1e-2,
+            contact_thickness=0.0,
+            joint_limit_ke=100.0,
+            joint_limit_kd=10.0,
+        )
 
     def create_articulation(self, builder):
-        # """Create the drone as a rigid body with automatic mass calculation."""        
-        # scene_data = warp.sim.import_usd.parse_usd(
-        #     "assets/table.usda", 
-        #     builder, 
-        #     verbose=True                       
-        # )
+        # """Create the drone as a rigid body with automatic mass calculation."""                
 
         # Create the drone as a single rigid body
-        body = builder.add_body()
+        body = builder.add_body(name="drone")
         
         # Calculate virtual density to achieve target body mass
         body_volume = self.body_dimensions[0] * self.body_dimensions[1] * self.body_dimensions[2]
@@ -1121,8 +1126,7 @@ class DroneParcour(WarpEnv):
         # Create simulation view for clean body access
         self.sim_view = SimulationView(
             model=self.model,
-            num_envs=self.num_envs,
-            num_mobile_obstacles=0
+            num_envs=self.num_envs            
         )
 
         with torch.no_grad():
@@ -1404,7 +1408,8 @@ class DroneParcour(WarpEnv):
 
             mask_need_respawn = min_distances < self.arm_specs[2] / 2.0 + 0.2
 
-            while torch.any(mask_need_respawn):
+            num_trials = 0
+            while torch.any(mask_need_respawn) and num_trials < 10:
                 # update spawn positions of problematic poses
                 num_to_respawn = torch.sum(mask_need_respawn).item()
                 # print(f"Respawning {num_to_respawn} targets...")     
@@ -1432,7 +1437,7 @@ class DroneParcour(WarpEnv):
                 # Update mask for next iteration                
                 mask_need_respawn = min_distances_respawn < self.arm_specs[2]  
 
-
+                num_trials += 1
             # generate random target attitudes            
             randomized_target_orientation = self.target_attitude_euler_deg.repeat(len(env_ids), 1) / 180.0 * math.pi
             randomized_target_orientation += torch.randn_like(randomized_target_orientation) * self.three_sigma_target_attitude_deg / 3.0 / 180.0 * math.pi
@@ -1528,7 +1533,7 @@ class DroneParcour(WarpEnv):
 
     def pre_physics_step(self, actions):        
         # Clamp actions to [-1, 1] range
-        actions = torch.clamp(actions, -1.0, 1.0)                        
+        actions = torch.clamp(actions*0.0, -1.0, 1.0)                        
         self.last_actor_cmd = actions.clone()
 
         body_q, body_qd = self.sim_view.get_drone_states(self.state)

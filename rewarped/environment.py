@@ -278,7 +278,7 @@ class Environment:
         builder = self.create_modelbuilder()
         
         # Add shared obstacles before creating environments
-        self.add_static_shared_obstacles(builder)
+        # self.add_static_shared_obstacles(builder)
 
         env_builder = self.create_modelbuilder()
         self.create_env(env_builder)
@@ -293,9 +293,11 @@ class Environment:
             )
         return builder
 
-    def create_env(self, builder):
+    def create_env(self, builder):        
         self.create_articulation(builder)
-        self.create_scene_interactive_elements(builder)
+        self.create_scene_interactive_elements(builder)   
+                  
+        print("done create env")   
     
     def create_scene_interactive_elements(self, builder):
         raise NotImplementedError
