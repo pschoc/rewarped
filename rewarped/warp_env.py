@@ -555,7 +555,13 @@ class WarpEnv(Environment):
         self.state_0 = self.model.state()
         self.control_0 = self.model.control()
         self.state_0.clear_forces()
-        self.control_0.clear()
+        if hasattr(self.control_0, "clear"):
+            self.control_0.clear()
+        else:
+            for name in vars(self.control_0):
+                value = getattr(self.control_0, name)
+                if isinstance(value, wp.array):
+                    value.assign(wp.zeros_like(value))
         if self.requires_grad:
             self.model_tensors = [wp.to_torch(getattr(self.model, k)) for k in self.model_tensors_names]
             self.state_tensors = [wp.to_torch(getattr(self.state_0, k)) for k in self.state_tensors_names]
@@ -584,11 +590,26 @@ class WarpEnv(Environment):
                 def copy_prev(x, prev_x, name, inplace=True):
                     attr, prev_attr = getattr(x, name), getattr(prev_x, name)
                     shape = attr.shape
-                    # attr, prev_attr = attr.view(self.num_envs, -1), prev_attr.view(self.num_envs, -1)
+                    if len(shape) == 0:
+                        return
+
+                    copy_indices = prev_env_ids
+                    lead_dim = shape[0]
+
+                    # Many Warp state arrays are flattened across environments
+                    # (e.g. `body_q`, `body_qd`, `joint_q`, `joint_qd`).
+                    # Restore full per-env contiguous blocks instead of indexing
+                    # those flattened arrays with raw env ids.
+                    if lead_dim != self.num_envs and self.num_envs > 0 and lead_dim % self.num_envs == 0:
+                        elems_per_env = lead_dim // self.num_envs
+                        base = prev_env_ids.unsqueeze(1) * elems_per_env
+                        offsets = torch.arange(elems_per_env, device=self.device).unsqueeze(0)
+                        copy_indices = (base + offsets).reshape(-1)
+
                     if inplace:
-                        attr.detach().index_copy_(0, prev_env_ids, prev_attr[prev_env_ids])
+                        attr.detach().index_copy_(0, copy_indices, prev_attr[copy_indices])
                     else:
-                        attr = attr.index_copy(0, prev_env_ids, prev_attr[prev_env_ids])
+                        attr = attr.index_copy(0, copy_indices, prev_attr[copy_indices])
                         x.assign(name, attr.reshape(shape))
 
                 # TODO: model_data?

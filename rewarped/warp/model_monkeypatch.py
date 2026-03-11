@@ -126,7 +126,10 @@ def Model_state(self: Model, requires_grad=None, copy="clone", integrator_type=N
 
 def Model_control(self: Model, requires_grad=None, clone_variables=True, copy="clone") -> Control:
     # Use a thin subclass to optionally carry external-force callback
-    c = ExternalControl()
+    try:
+        c = ExternalControl(self)
+    except TypeError:
+        c = ExternalControl()
     if requires_grad is None:
         requires_grad = self.requires_grad
     if clone_variables and copy is not None:

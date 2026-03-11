@@ -8,6 +8,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import argparse
+import inspect
 import os
 from enum import Enum
 from typing import Tuple
@@ -295,7 +296,7 @@ class Environment:
 
     def create_env(self, builder):        
         self.create_articulation(builder)
-        self.create_scene_interactive_elements(builder)
+        # self.create_scene_interactive_elements(builder)
                   
         print("done create env")   
     
@@ -342,26 +343,43 @@ class Environment:
         return model
 
     def create_integrator(self, model):
+        def _filter_integrator_kwargs(integrator_ctor, kwargs):
+            try:
+                sig = inspect.signature(integrator_ctor)
+            except (TypeError, ValueError):
+                return kwargs
+
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return kwargs
+
+            valid_params = set(sig.parameters.keys())
+            return {k: v for k, v in kwargs.items() if k in valid_params}
+
         if self.integrator_type == IntegratorType.EULER:
             sim_substeps = self.sim_substeps_euler
             integrator_settings = self.euler_settings
-            integrator = wp.sim.SemiImplicitIntegrator(**integrator_settings)
+            integrator_kwargs = _filter_integrator_kwargs(wp.sim.SemiImplicitIntegrator, integrator_settings)
+            integrator = wp.sim.SemiImplicitIntegrator(**integrator_kwargs)
         elif self.integrator_type == IntegratorType.FEATHERSTONE:
             sim_substeps = self.sim_substeps_featherstone
             integrator_settings = self.featherstone_settings
-            integrator = wp.sim.FeatherstoneIntegrator(model, **integrator_settings)
+            integrator_kwargs = _filter_integrator_kwargs(wp.sim.FeatherstoneIntegrator, integrator_settings)
+            integrator = wp.sim.FeatherstoneIntegrator(model, **integrator_kwargs)
         elif self.integrator_type == IntegratorType.XPBD:
             sim_substeps = self.sim_substeps_xpbd
             integrator_settings = self.xpbd_settings
-            integrator = wp.sim.XPBDIntegrator(**integrator_settings)
+            integrator_kwargs = _filter_integrator_kwargs(wp.sim.XPBDIntegrator, integrator_settings)
+            integrator = wp.sim.XPBDIntegrator(**integrator_kwargs)
         elif self.integrator_type == IntegratorType.VBD:
             sim_substeps = self.sim_substeps_vbd
             integrator_settings = self.vbd_settings
-            integrator = wp.sim.VBDIntegrator(model, **integrator_settings)
+            integrator_kwargs = _filter_integrator_kwargs(wp.sim.VBDIntegrator, integrator_settings)
+            integrator = wp.sim.VBDIntegrator(model, **integrator_kwargs)
         elif self.integrator_type == IntegratorType.MPM:
             sim_substeps = self.sim_substeps_mpm
             integrator_settings = self.mpm_settings
-            integrator = wp.sim.MPMIntegrator(model, **integrator_settings)
+            integrator_kwargs = _filter_integrator_kwargs(wp.sim.MPMIntegrator, integrator_settings)
+            integrator = wp.sim.MPMIntegrator(model, **integrator_kwargs)
         else:
             raise NotImplementedError(self.integrator_type)
         return sim_substeps, integrator_settings, integrator

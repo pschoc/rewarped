@@ -1,6 +1,7 @@
 # pyright: reportGeneralTypeIssues=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false
 import os
 import math
+from pathlib import Path
 import torch
 import warp as wp
 import warp.sim  # ensure wp.sim types are loaded
@@ -23,11 +24,19 @@ class SimulationView:
         self.device = model.device
         self.num_envs = num_envs
 
-        # Body indices: [drone, object, object, ..., object]
-        self.drone_indices = list(range(0,1))
+        # Prefer explicit body-name lookup since repeated env builders and imported
+        # scene assets do not always preserve a simple per-env body stride layout.
+        body_names = list(getattr(model, "body_name", []))
+        self.drone_indices = [i for i, name in enumerate(body_names) if name == "drone"]
 
-        self.num_mobile_obstacles = model.body_count - 1
-        self.obstacle_indices = list(range(1, 1 + self.num_mobile_obstacles))
+        # Fallback to the old stride heuristic if names are unavailable/unexpected.
+        self.bodies_per_env = max(1, model.body_count // max(1, num_envs))
+        if len(self.drone_indices) != num_envs:
+            self.drone_indices = [env_idx * self.bodies_per_env for env_idx in range(num_envs)]
+
+        drone_idx_set = set(self.drone_indices)
+        self.obstacle_indices = [body_idx for body_idx in range(model.body_count) if body_idx not in drone_idx_set]
+        self.num_mobile_obstacles = len(self.obstacle_indices)
 
         # Create warp arrays for efficient GPU access
         self._obstacle_indices_wp = wp.array(self.obstacle_indices, dtype=int, device=self.device) if self.num_mobile_obstacles > 0 else None
@@ -184,7 +193,7 @@ def sdf_shape_distance_world(
 
 @wp.kernel
 def collision_distance_kernel(
-    body_q: wp.array(dtype=wp.transform),
+    target_body_q: wp.array(dtype=wp.transform),
     indices_shape_with_collision: wp.array(dtype=int),    
     drone_body_index: wp.array(dtype=int),
     shape_X_bs: wp.array(dtype=wp.transform),
@@ -199,7 +208,7 @@ def collision_distance_kernel(
     if shape_body[shape_index] == drone_idx:
         d = float(1.0e6) # max val                
     else:
-        px = wp.transform_get_translation(body_q[drone_idx])
+        px = wp.transform_get_translation(target_body_q[env_id])
         d = sdf_shape_distance_world(px, shape_index, shape_X_bs, geo)
 
     d = wp.max(d, 0.0)
@@ -214,7 +223,7 @@ def apply_drone_forces_kernel(
     body_f: wp.array(dtype=wp.spatial_vector),
     drone_body_index: wp.array(dtype=int),
     drone_force_torque_mapping: wp.array(dtype=float, ndim=2),  # shape [6, 6]
-    body_force: wp.array(dtype=float, ndim=2),  # shape [num_envs, 6]
+    body_force: wp.array(dtype=float, ndim=2),  # shape [num_envs, 6], normalized actuator command
     max_rpm: float,
 ):
     env_id = wp.tid()
@@ -240,7 +249,7 @@ def apply_drone_forces_kernel(
         rpm_cmd = body_force[env_id, j]              
         squared_omega = (rpm_cmd * rpm_scale) * (rpm_cmd * rpm_scale)        
 
-        if rpm_cmd < 0.0:  
+        if rpm_cmd < 0.0:
             squared_omega *= -1.0
 
         # Matrix multiplication: result[i] = sum(mapping[i,j] * squared_omega[j])
@@ -311,11 +320,16 @@ def ray_plane(ro: wp.vec3, rd: wp.vec3, n: wp.vec3, d: float, t_max: float):
 @wp.func
 def ray_box(ro: wp.vec3, rd: wp.vec3, hx: float, hy: float, hz: float, t_max: float):
     # Axis-aligned in local space: |x|<=hx, |y|<=hy, |z|<=hz
-    inv = wp.vec3(
-        1.0/rd[0] if wp.abs(rd[0]) > 1e-9 else 1e18,
-        1.0/rd[1] if wp.abs(rd[1]) > 1e-9 else 1e18,
-        1.0/rd[2] if wp.abs(rd[2]) > 1e-9 else 1e18
-    )
+    invx = 1e18
+    if wp.abs(rd[0]) > 1e-9:
+        invx = 1.0 / rd[0]
+    invy = 1e18
+    if wp.abs(rd[1]) > 1e-9:
+        invy = 1.0 / rd[1]
+    invz = 1e18
+    if wp.abs(rd[2]) > 1e-9:
+        invz = 1.0 / rd[2]
+    inv = wp.vec3(invx, invy, invz)
     t1 = (-hx - ro[0]) * inv[0]
     t2 = ( hx - ro[0]) * inv[0]
     tmin = wp.min(t1, t2)
@@ -503,6 +517,7 @@ def render_depth_raytrace_kernel(
     shape_X_bs: wp.array(dtype=wp.transform),
     geo: wp.sim.ModelShapeGeometry,
     obstacle_ids: wp.array(dtype=int),
+    num_obstacles: int,
     cam_dirs_local: wp.array(dtype=wp.vec3),
     cam_pos_local: wp.vec3,
     min_depth: float,
@@ -522,7 +537,7 @@ def render_depth_raytrace_kernel(
     color = wp.vec3(0.0, 0.0, 0.0)
 
     # Iterate shapes
-    for s in range(len(obstacle_ids)):
+    for s in range(num_obstacles):
         shape_index = obstacle_ids[s]        
         if shape_index < 0 or shape_index == body_idx:
             continue
@@ -601,7 +616,8 @@ def render_depth_raytrace_kernel(
             n_world = wp.normalize(wp.transform_vector(X_ws, n_local))
             p_world = wp.transform_get_translation(X_ws)
             d = wp.dot(n_world, p_world)
-            t_candidate = ray_plane(ro, rd, n_world, d, t_hit)
+            t_candidate = ray_plane(ro, rd, n_world, d, t_hit
+)
             if t_candidate < t_hit and t_candidate >= min_depth:
                 t_hit = t_candidate
 
@@ -633,28 +649,26 @@ class DroneParcour(WarpEnv):
         self.has_static_obstacles = kwargs.pop("has_static_obstacles", False)
         self.no_env_offset = kwargs.pop("no_env_offset", False)
 
-        frame_fps = kwargs.pop("frame_fps", 4)  # Simulation steps per second
+        frame_fps = kwargs.pop("frame_fps")  # Simulation steps per second
         self.frame_dt = 1.0 / frame_fps  # seconds per frame
-        solver_fps = kwargs.pop("solver_fps", 400)  # Solver steps per second        
+        solver_fps = kwargs.pop("solver_fps")  # Solver steps per second
         self.sim_substeps = round(solver_fps / frame_fps)
-        self.episode_duration = kwargs.pop("max_episode_duration", max_episode_length)  # seconds
+        self.episode_duration = kwargs.pop("max_episode_duration")  # seconds
 
-        self.gravity = kwargs.pop("gravity", -9.81)  # m/s²
-        self.max_target_lin_vel = kwargs.pop("max_target_lin_vel", 1.0)  # m/s
-        self.max_target_ang_vel = kwargs.pop("max_target_ang_vel", 1.0)  # rad/s
+        self.gravity = kwargs.pop("gravity")  # m/s²
 
         # Define bounds: [[x_min, x_max], [y_min, y_max], [z_min, z_max]]
-        self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds", [[-2.0, 2.0], [1.0, 3.0], [-2.0, 2.0]]), device=device)
-        self.arena_bounds = torch.tensor(kwargs.pop("arena_bounds", [[-8.0, 8.0], [0.0, 6.0], [-8.0, 8.0]]), device=device)
-        self.target_bounds = torch.tensor(kwargs.pop("target_bounds", [[-6.0, 6.0], [1.0, 5.0], [-6.0, 6.0]]), device=device)
-        self.room_bounds = torch.tensor(kwargs.pop("room_bounds", [[-10.0, 10.0], [0.0, 4.0], [-10.0, 10.0]]), device=device)
+        self.spawn_bounds = torch.tensor(kwargs.pop("spawn_bounds"), device=device)
+        self.arena_bounds = torch.tensor(kwargs.pop("arena_bounds"), device=device)
+        self.target_bounds = torch.tensor(kwargs.pop("target_bounds"), device=device)
+        self.room_bounds = torch.tensor(kwargs.pop("room_bounds"), device=device)
 
-        self.num_static_obstacles = kwargs.pop("num_static_obstacles", 5)
-        self.obstacle_min_size = kwargs.pop("obstacle_min_size", 0.2)
-        self.obstacle_max_size = kwargs.pop("obstacle_max_size", 0.5)
-        self.termination_distance = kwargs.pop("termination_distance", 0.2)
+        self.num_static_obstacles = kwargs.pop("num_static_obstacles")
+        self.obstacle_min_size = kwargs.pop("obstacle_min_size")
+        self.obstacle_max_size = kwargs.pop("obstacle_max_size")
+        self.termination_distance = kwargs.pop("termination_distance")
 
-        self.is_render_targets = kwargs.pop("is_render_targets", False)  # Whether to render target coordinate frames
+        self.is_render_targets = kwargs.pop("is_render_targets")  # Whether to render target coordinate frames
 
         # spawning parameters
         self.initial_drone_attitude_euler_deg = torch.tensor(kwargs.pop("initial_drone_attitude_euler_deg", [0.0, 0.0, 0.0]), device=device)  # [roll, pitch, yaw] in degrees
@@ -706,6 +720,7 @@ class DroneParcour(WarpEnv):
         # Extract render settings from config
         render = kwargs.pop("render", False)
         render_mode = kwargs.pop("render_mode", "none")
+        self.render_num_envs = max(1, min(int(kwargs.pop("render_num_envs", num_envs)), num_envs))
 
         # Depth camera parameters
         self.cam_width = kwargs.pop("cam_width", 48)
@@ -720,29 +735,45 @@ class DroneParcour(WarpEnv):
             [self.body_dimensions[0] / 2.0 + 0.02, 0.0, 0.0],
         )
         
-        # Simple observation like ant: position + velocity + target + actions = 16
+        # Body-centric tracking observation:
+        # lin_vel_B (3) + ang_vel_B (3) + world_up_B (3) + pos_err_B (3)
+        # + rel_target_lin_vel_B (3) + target_attitude_error_B (3) + last_action (6)
+        self.vector_obs_size = 24
         if self.use_depth_observations:
             num_obs = {
-                'obs': 13,
+                'obs': self.vector_obs_size,
                 'obs_depth':  (self.cam_width, self.cam_height) if self.use_depth_observations else None
             }            
         else:
             num_obs = {
-                'obs': 13,                
+                'obs': self.vector_obs_size,
             }  
             
         self.obs_space = self.create_obs_space(num_obs)
 
-        num_act_policy = 4
+        num_act_policy = 6
         self.num_act_controller = 6  # motor RPM commands
+        rotor_cmd_min = float(kwargs.pop("rotor_cmd_min", 0.0))
+        rotor_cmd_max = float(kwargs.pop("rotor_cmd_max", 1.0))
+        self.action_limits = torch.tensor(
+            [[rotor_cmd_min, rotor_cmd_max]] * self.num_act_controller,
+            device=device,
+            dtype=torch.float32,
+        )
 
         # collision group indices
         self.collision_group_index_obstacles = -1  # -1 means collide with everything
         self.collision_group_index_agent = -1      # -1 means collide with everything
   
-        self.last_actor_cmd = torch.zeros((num_envs, self.num_act_controller), device=device, requires_grad=True)
-        self.last_power_draw = torch.zeros(num_envs, device=device, requires_grad=True)
+        self.last_actor_cmd = torch.zeros((num_envs, num_act_policy), device=device)
+        self.last_power_draw = torch.zeros(num_envs, device=device)
         self.spawn_positions = torch.zeros((num_envs, 3), device=device)
+
+        self.max_cmd_lin_acc = kwargs.pop("max_cmd_lin_acc", 8.0)
+        self.max_cmd_ang_acc = kwargs.pop("max_cmd_ang_acc", 15.0)
+        self.indi_k = kwargs.pop("indi_k", 1.0)
+        self.indi_alpha_lp = kwargs.pop("indi_alpha_lp", 0.25)
+        self.indi_max_delta_ratio = kwargs.pop("indi_max_delta_ratio", 0.1)
         
         # initialize imu readings
         self.imu_accel_bias_std = kwargs.pop("imu_accel_bias_std", 0.01)
@@ -768,7 +799,7 @@ class DroneParcour(WarpEnv):
             early_termination=early_termination,
             render=render,
             render_mode=render_mode,
-            use_graph_capture=True,
+            use_graph_capture=self.use_graph_capture,
             **kwargs,
         )        
        
@@ -1209,8 +1240,16 @@ class DroneParcour(WarpEnv):
         return model
     
     def create_scene_interactive_elements(self, builder):        
+        workspace_root = Path(__file__).resolve().parents[4]
+        candidate_paths = [
+            workspace_root / "aerial_manipulation_assets" / "manipulation_scene.usd",
+            workspace_root / "assets" / "manipulation_scene.usd",
+            Path("assets/manipulation_scene.usd"),
+        ]
+        scene_path = next((path for path in candidate_paths if path.exists()), candidate_paths[-1])
+
         warp.sim.import_usd.parse_usd(
-            "assets/manipulation_scene.usd", 
+            str(scene_path),
             builder, 
             verbose=True,
             invert_rotations=True, # why the fuck do we need this? It appears like the tfs are reversed (either from omniverse usd composer or applied in reverse in the warp mesh generator)         
@@ -1393,6 +1432,18 @@ class DroneParcour(WarpEnv):
             num_envs=self.num_envs            
         )
 
+        self._render_state_masked = None
+        self._render_hidden_body_indices = None
+        if self.render_num_envs < self.num_envs:
+            body_count = int(self.model.body_count)
+            if self.num_envs > 0 and body_count % self.num_envs == 0:
+                bodies_per_env = body_count // self.num_envs
+                hidden_env_ids = torch.arange(self.render_num_envs, self.num_envs, device=self.device, dtype=torch.long)
+                base = hidden_env_ids.unsqueeze(1) * bodies_per_env
+                offsets = torch.arange(bodies_per_env, device=self.device, dtype=torch.long).unsqueeze(0)
+                self._render_hidden_body_indices = (base + offsets).reshape(-1)
+                self._render_state_masked = self.model.state(requires_grad=False, copy="zeros")
+
         with torch.no_grad():
             self.start_rotation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
 
@@ -1450,14 +1501,36 @@ class DroneParcour(WarpEnv):
         self.indices_shape_with_collision = wp.array([i for i, x in enumerate(self.model.shape_shape_collision) if x], dtype=int, device=self.model.device)        
         self._collision_distances = wp.zeros([self.num_envs, len(self.indices_shape_with_collision)], dtype=wp.float32, device=self.model.device, requires_grad=True)
         
+        # INDI controller internal state
+        self._indi_omega_sq_cmd = torch.zeros((self.num_envs, self.num_act_controller), device=self.device)
+        self._indi_prev_lin_vel_W = torch.zeros((self.num_envs, 3), device=self.device)
+        self._indi_prev_ang_vel_B = torch.zeros((self.num_envs, 3), device=self.device)
+        self._indi_lin_acc_meas_lp = torch.zeros((self.num_envs, 3), device=self.device)
+        self._indi_ang_acc_meas_lp = torch.zeros((self.num_envs, 3), device=self.device)
+
         # random spawn points
         self.randomize_init(torch.arange(self.num_envs, device=self.device))
+
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+
+        # DroneParcour requires explicit spawn/controller state reset each episode.
+        # Base WarpEnv only calls randomize_init() when self.randomize is True.
+        if not self.randomize:
+            self.randomize_init(env_ids)
             
     def setup_drone(self):
         """Setup drone parameters and cache computed values. Can be called to reset/randomize parameters."""
         # Calculate and cache max RPM from motor specifications
         self.max_rpm = self.motor_kv * self.nominal_cell_voltage * self.lipo_cells
-        self.max_omega = self.max_rpm * 2.0 * 3.14159 / 60.0  # rad/s        
+        self.max_omega = self.max_rpm * 2.0 * 3.14159 / 60.0  # rad/s
+
+        # Initialize a hover bias so resets start near a sustainable thrust level.
+        mapping_torch = wp.to_torch(self._drone_force_torque_mapping).to(device=self.device)
+        total_vertical_force_coeff = torch.clamp(mapping_torch[1, :].sum(), min=1.0e-6)
+        drone_mass = wp.to_torch(self.model.body_mass)[self.sim_view.drone_indices[0]].to(device=self.device)
+        self.hover_omega_sq = torch.clamp(drone_mass * abs(float(self.gravity)) / total_vertical_force_coeff, min=0.0)
+        self.hover_rpm_cmd = torch.clamp(torch.sqrt(self.hover_omega_sq) / self.max_omega, 0.0, 1.0)
 
     def print_drone_specs(self):
         """Calculate and display drone specifications including thrust-to-weight ratio."""
@@ -1531,23 +1604,58 @@ class DroneParcour(WarpEnv):
         """Override render to show dynamic target spheres"""        
         if self.render_time % (1.0 / self.render_fps) < self.frame_dt:
             if self.renderer is not None:
+                render_state = state or self.state_0
+                visible_env_count = min(self.render_num_envs, self.num_envs)
+
+                if self._render_state_masked is not None and self._render_hidden_body_indices is not None:
+                    self._render_state_masked.body_q.assign(render_state.body_q)
+                    masked_body_q = wp.to_torch(self._render_state_masked.body_q)
+                    masked_body_q[self._render_hidden_body_indices, 0:3] = 1.0e6
+                    render_state = self._render_state_masked
+
                 self.renderer.begin_frame(self.render_time)
                 
                 # Add custom target visualization if targets exist
                 if hasattr(self, 'target_body_q') and self.is_render_targets:
+                    supports_line_strip = hasattr(self.renderer, "render_line_strip")
+                    supports_arrows = hasattr(self.renderer, "render_arrow")
+
                     # Draw target coordinate frames for each environment
-                    for i in range(self.num_envs):
+                    for i in range(visible_env_count):
                         target_pos = self.target_body_q[i, :3].cpu().numpy()
                         target_quat = self.target_body_q[i, 3:7].cpu().numpy()  # [x, y, z, w]
                                 
-                        # Arrow dimensions
-                        base_radius = 0.05
-                        base_height = 0.3
-                        cap_radius = 0.08
-                        cap_height = 0.1
-                        
-                        try:
-                            # stateX-axis arrow (red)
+                        if supports_line_strip:
+                            axis_length = 0.4
+                            axes_local = torch.tensor(
+                                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                                device=self.device,
+                                dtype=self.target_body_q.dtype,
+                            )
+                            target_quat_t = self.target_body_q[i, 3:7].unsqueeze(0).repeat(3, 1)
+                            target_pos_t = self.target_body_q[i, 0:3].unsqueeze(0).repeat(3, 1)
+                            axes_world = quat_rotate(target_quat_t, axes_local)
+                            axis_endpoints = target_pos_t + axis_length * axes_world
+
+                            color_map = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+                            for axis_idx in range(3):
+                                self.renderer.render_line_strip(
+                                    vertices=np.stack(
+                                        (
+                                            target_pos_t[axis_idx].detach().cpu().numpy(),
+                                            axis_endpoints[axis_idx].detach().cpu().numpy(),
+                                        )
+                                    ),
+                                    color=color_map[axis_idx],
+                                    radius=0.02,
+                                    name=f"target_axis_{axis_idx}_{i}",
+                                )
+                        elif supports_arrows:
+                            # Fallback if line strips are unavailable
+                            base_radius = 0.05
+                            base_height = 0.3
+                            cap_radius = 0.08
+                            cap_height = 0.1
                             self.renderer.render_arrow(
                                 name=f"target_x_{i}",
                                 pos=tuple(target_pos),
@@ -1556,12 +1664,9 @@ class DroneParcour(WarpEnv):
                                 base_height=base_height,
                                 cap_radius=cap_radius,
                                 cap_height=cap_height,
-                                up_axis=0,  # X-axis
-                                color=(1.0, 0.0, 0.0),  # Red
-                                visible=True
+                                up_axis=0,
+                                color=(1.0, 0.0, 0.0),
                             )
-                            
-                            # Y-axis arrow (green) - points downward in warp coordinate system
                             self.renderer.render_arrow(
                                 name=f"target_y_{i}",
                                 pos=tuple(target_pos),
@@ -1570,12 +1675,9 @@ class DroneParcour(WarpEnv):
                                 base_height=base_height,
                                 cap_radius=cap_radius,
                                 cap_height=cap_height,
-                                up_axis=1,  # Y-axis (downward)
-                                color=(0.0, 1.0, 0.0),  # Green
-                                visible=True
+                                up_axis=1,
+                                color=(0.0, 1.0, 0.0),
                             )
-                            
-                            # Z-axis arrow (blue)
                             self.renderer.render_arrow(
                                 name=f"target_z_{i}",
                                 pos=tuple(target_pos),
@@ -1584,22 +1686,17 @@ class DroneParcour(WarpEnv):
                                 base_height=base_height,
                                 cap_radius=cap_radius,
                                 cap_height=cap_height,
-                                up_axis=2,  # Z-axis
-                                color=(0.0, 0.0, 1.0),  # Blue
-                                visible=True
+                                up_axis=2,
+                                color=(0.0, 0.0, 1.0),
                             )
-                        except Exception as e:
-                            # If rendering fails, skip this target
-                            pass
                 
                 # Render the simulation state
-                self.renderer.render(state or self.state_0)
+                self.renderer.render(render_state)
                 self.renderer.end_frame()
 
             if self.debug_pov:
                 # Visualize depth observations with tiled plot
                 import matplotlib.pyplot as plt
-                import numpy as np
                 
                 # Initialize figure and axes once
                 if not hasattr(self, '_debug_fig'):
@@ -1644,23 +1741,29 @@ class DroneParcour(WarpEnv):
     def reset_targets(self, env_ids):
         """Reset target positions to random locations within target bounds"""
         with torch.no_grad():            
+            env_offsets = self.env_offsets[env_ids] if not self.no_env_offset else torch.zeros((len(env_ids), 3), device=self.device, dtype=self.target_bounds.dtype)
+            drone_indices_subset = torch.as_tensor(self.sim_view.drone_indices, device=self.device, dtype=torch.int32)[env_ids].contiguous()
+            drone_indices_subset_wp = wp.from_torch(drone_indices_subset, dtype=wp.int32)
+
             # Generate random positions within scaled target bounds
             random_factors = torch.rand([len(env_ids), 3], device=self.device)
             mins = self.target_bounds[:, 0]  # [x_min, y_min, z_min]
             maxs = self.target_bounds[:, 1]  # [x_max, y_max, z_max]
             ranges = maxs - mins        # [x_range, y_range, z_range]
 
-            target_pos_rand = mins + random_factors * ranges
+            target_pos_rand = mins + random_factors * ranges + env_offsets
 
             indices_shape_with_collision = wp.array([i for i, x in enumerate(self.model.shape_shape_collision) if x], dtype=int, device=self.model.device)        
-            _collision_distances = wp.zeros([len(env_ids), len(indices_shape_with_collision)], dtype=wp.float32, device=self.model.device, requires_grad=True)
+            _collision_distances = wp.zeros([len(env_ids), len(indices_shape_with_collision)], dtype=wp.float32, device=self.model.device, requires_grad=True)            
+            target_tfs = torch.cat((target_pos_rand, torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1)), dim=-1).float()                        
+            target_tfs_wp = wp.from_torch(target_tfs, dtype=wp.transform)
             wp.launch(
                 collision_distance_kernel,
                 dim=(len(env_ids), len(indices_shape_with_collision)),
                 inputs=[
-                    wp.array(torch.cat((target_pos_rand, torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1)), dim=-1), dtype=wp.transform, device=self.model.device),  # target transforms
+                    target_tfs_wp,
                     indices_shape_with_collision,
-                    self.sim_view._drone_indices_wp,
+                    drone_indices_subset_wp,
                     self.model.shape_transform,
                     self.model.shape_geo,  
                     self.model.shape_body,                                            
@@ -1678,9 +1781,12 @@ class DroneParcour(WarpEnv):
                 num_to_respawn = torch.sum(mask_need_respawn).item()
                 # print(f"Respawning {num_to_respawn} targets...")     
                 random_factors = torch.rand([num_to_respawn, 3], device=self.device)
-                target_pos_rand[torch.where(mask_need_respawn)[0], :] = mins + random_factors * ranges
+                respawn_ids = torch.where(mask_need_respawn)[0]
+                target_pos_rand[respawn_ids, :] = mins + random_factors * ranges + env_offsets[respawn_ids]
                 
-                candidate_transforms = wp.array(torch.cat((target_pos_rand, torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1)), dim=-1), dtype=wp.transform, device=self.model.device)
+                candidate_tfs = torch.cat((target_pos_rand, torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).expand(len(env_ids), -1)), dim=-1).float()
+                torch_device = str(self.model.device) if hasattr(self.model.device, '__str__') else 'cpu'
+                candidate_transforms = wp.from_torch(candidate_tfs.to(torch_device), dtype=wp.transform)
                 
                 wp.launch(
                     collision_distance_kernel,
@@ -1688,7 +1794,7 @@ class DroneParcour(WarpEnv):
                     inputs=[
                         candidate_transforms,  # target transforms
                         indices_shape_with_collision,
-                        self.sim_view._drone_indices_wp,
+                        drone_indices_subset_wp,
                         self.model.shape_transform,
                         self.model.shape_geo,  
                         self.model.shape_body,                                            
@@ -1754,9 +1860,13 @@ class DroneParcour(WarpEnv):
     def randomize_init(self, env_ids):        
         """Randomize drone spawn positions using SimulationView"""
         N = len(env_ids)
-        
-        # Get drone states using the simulation view
-        body_q, body_qd = self.sim_view.get_drone_states(self.state)
+        env_offsets = self.env_offsets[env_ids] if not self.no_env_offset else torch.zeros((N, 3), device=self.device, dtype=self.spawn_bounds.dtype)
+
+        # Write directly to underlying state tensors (avoid advanced-index copies)
+        state_body_q = self.state.body_q
+        state_body_qd = self.state.body_qd
+        drone_indices = torch.as_tensor(self.sim_view.drone_indices, device=self.device, dtype=torch.long)
+        selected_body_indices = drone_indices[env_ids]
 
         ##  ================== sample initial pose ========================
         # generate random initial drone attitudes            
@@ -1772,111 +1882,149 @@ class DroneParcour(WarpEnv):
         initial_quat = quat_mul(quat_yaw, quat_mul(quat_pitch, quat_roll))
         
         # Set initial quaternion for all selected environments
-        body_q[env_ids, 3:7] = initial_quat
+        state_body_q[selected_body_indices, 3:7] = initial_quat
         
         # Add random position offset
         # Generate random spawn positions within spawn bounds
         spawn_mins = self.spawn_bounds[:, 0]  # [x_min, y_min, z_min]
         spawn_maxs = self.spawn_bounds[:, 1]  # [x_max, y_max, z_max]
         spawn_ranges = spawn_maxs - spawn_mins
-        body_q[env_ids, 0:3] = spawn_mins + torch.rand(size=(N, 3), device=self.device) * spawn_ranges
+        spawn_positions = spawn_mins + torch.rand(size=(N, 3), device=self.device) * spawn_ranges + env_offsets
+        state_body_q[selected_body_indices, 0:3] = spawn_positions
 
-        self.spawn_positions[env_ids,:] = body_q[env_ids, 0:3].clone().detach()
+        self.spawn_positions[env_ids,:] = spawn_positions.clone().detach()
 
         ##  ================== sample initial velocity ========================
         # linear random velocity
-        sigma_initial_lin_vel_tensor = torch.tensor(self.three_sigma_initial_lin_vel, device=self.device) / 3.0
-        body_qd[env_ids, 3:6] = torch.randn_like(body_qd[env_ids, 3:6]) * sigma_initial_lin_vel_tensor
+        sigma_initial_lin_vel_tensor = self.three_sigma_initial_lin_vel.to(device=self.device) / 3.0
+        lin_vel_samples = torch.randn((N, 3), device=self.device, dtype=state_body_qd.dtype) * sigma_initial_lin_vel_tensor
+        state_body_qd[selected_body_indices, 3:6] = lin_vel_samples
 
         # angular random velocity
-        sigma_initial_ang_vel_tensor = torch.tensor(self.three_sigma_initial_ang_vel, device=self.device) / 3.0
-        body_qd[env_ids, :3] = torch.randn_like(body_qd[env_ids, :3]) * sigma_initial_ang_vel_tensor
+        sigma_initial_ang_vel_tensor = self.three_sigma_initial_ang_vel.to(device=self.device) / 3.0
+        ang_vel_samples = torch.randn((N, 3), device=self.device, dtype=state_body_qd.dtype) * sigma_initial_ang_vel_tensor
+        state_body_qd[selected_body_indices, :3] = ang_vel_samples
+
+        # Some drone bodies are driven through free-joint state and get overwritten
+        # by eval_fk() during reset. Mirror the sampled body state into the matching
+        # joint_q/joint_qd entries for any joints whose child body is a drone body.
+        if hasattr(self.model, "joint_child") and self.model.joint_count > 0:
+            state_joint_q = wp.to_torch(self.state_0.joint_q)
+            state_joint_qd = wp.to_torch(self.state_0.joint_qd)
+            joint_child = wp.to_torch(self.model.joint_child).to(device=self.device, dtype=torch.long)
+            joint_q_start = wp.to_torch(self.model.joint_q_start).to(device=self.device, dtype=torch.long)
+            joint_qd_start = wp.to_torch(self.model.joint_qd_start).to(device=self.device, dtype=torch.long)
+
+            for sample_idx, body_idx in enumerate(selected_body_indices.tolist()):
+                matching_joints = torch.where(joint_child == body_idx)[0]
+                for joint_idx in matching_joints.tolist():
+                    q_start = int(joint_q_start[joint_idx].item())
+                    qd_start = int(joint_qd_start[joint_idx].item())
+                    state_joint_q[q_start : q_start + 3] = spawn_positions[sample_idx]
+                    state_joint_q[q_start + 3 : q_start + 7] = initial_quat[sample_idx]
+                    state_joint_qd[qd_start : qd_start + 3] = ang_vel_samples[sample_idx]
+                    state_joint_qd[qd_start + 3 : qd_start + 6] = lin_vel_samples[sample_idx]
+
+        if hasattr(self, "_indi_omega_sq_cmd"):
+            self._indi_omega_sq_cmd[env_ids] = self.hover_omega_sq
+        if hasattr(self, "_indi_prev_lin_vel_W"):
+            self._indi_prev_lin_vel_W[env_ids] = lin_vel_samples
+        if hasattr(self, "_indi_prev_ang_vel_B"):
+            self._indi_prev_ang_vel_B[env_ids] = ang_vel_samples
+        if hasattr(self, "_indi_lin_acc_meas_lp"):
+            self._indi_lin_acc_meas_lp[env_ids] = 0.0
+        if hasattr(self, "_indi_ang_acc_meas_lp"):
+            self._indi_ang_acc_meas_lp[env_ids] = 0.0
         
         self.reset_targets(env_ids)
 
 
     def pre_physics_step(self, actions):        
         # Clamp actions to [-1, 1] range
-        actions = torch.clamp(actions*0.0, -1.0, 1.0)                        
+        actions = torch.clamp(actions, -1.0, 1.0)
         self.last_actor_cmd = actions.clone()
 
+        # Keep controller memory as detached buffers. Otherwise partial resets can
+        # mutate tensors that still belong to an older autograd graph, which
+        # trips version-counter errors during backward.
+        prev_indi_omega_sq_cmd = self._indi_omega_sq_cmd.detach()
+        prev_indi_prev_lin_vel_W = self._indi_prev_lin_vel_W.detach()
+        prev_indi_prev_ang_vel_B = self._indi_prev_ang_vel_B.detach()
+        prev_indi_lin_acc_meas_lp = self._indi_lin_acc_meas_lp.detach()
+        prev_indi_ang_acc_meas_lp = self._indi_ang_acc_meas_lp.detach()
+
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
-        omega_body_W = quat_rotate(body_q[:, 3:7], body_qd[:, 0:3])
-                                 
-        body_qd_desired_B = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype)       
-        # body_qd_desired_B[:, 0] = 0.1  
-        # body_qd_desired_B[:, :3] = actions[:, :3] * self.max_target_ang_vel  # ang vel cmd
-        body_qd_desired_B[:, 3:6] = actions[:, :3] * self.max_target_lin_vel  # lin vel cmd
-        body_qd_desired_B[:, 1] = actions[:, 3] * self.max_target_ang_vel  # ang vel cmd        
+        quat_current = body_q[:, 3:7]
+        lin_vel_W = torch.nan_to_num(body_qd[:, 3:6])
+        ang_vel_B = torch.nan_to_num(body_qd[:, 0:3])
 
-        # ============== ATTITUDE CONTROL LAW ==============        
-        # Get current orientation
-        quat_current = body_q[:, 3:7]  # [x, y, z, w]
-        body_y = quat_rotate(quat_current, torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
-        world_up = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1)
+        # 6D action: [a_Bx, a_By, a_Bz, alpha_Bx, alpha_By, alpha_Bz]
+        a_cmd_B = actions[:, 0:3] * self.max_cmd_lin_acc
+        alpha_cmd_B = actions[:, 3:6] * self.max_cmd_ang_acc
 
-        attitude_error_W = torch.cross(body_y, world_up, dim=1)
-        attitude_error_B = quat_rotate(quat_conjugate(quat_current), attitude_error_W)
-       
-        body_qd_desired_B[:, (0,2)] = 1.0 * attitude_error_B[:, (0,2)]
-        
-        # compute control input in world frame
-        body_qd_desired_W = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype)         
-        body_qd_desired_W[:, 0:3] = quat_rotate(body_q[:, 3:7], body_qd_desired_B[:, 0:3]) 
-        body_qd_desired_W[:, 3:6] = quat_rotate(body_q[:, 3:7], body_qd_desired_B[:, 3:6])
+        # Convert desired body linear acceleration to world frame for INDI target ν
+        a_cmd_W = quat_rotate(quat_current, a_cmd_B)
+        nu = torch.cat((a_cmd_W, alpha_cmd_B), dim=1)
 
-        # control input in world frame
-        body_qdd_cmd_W = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype) 
+        # Measured derivatives (incremental control signal for INDI)
+        lin_acc_W_meas = (lin_vel_W - prev_indi_prev_lin_vel_W) / max(self.frame_dt, 1e-6)
+        ang_acc_B_meas = (ang_vel_B - prev_indi_prev_ang_vel_B) / max(self.frame_dt, 1e-6)
 
-        gain_p_ang = 3.0     
-        gain_p_lin = 10.0           
-        
-        body_qdd_cmd_W[:, 0:3] = gain_p_ang * (body_qd_desired_W[:, 0:3] - body_qd[:, 0:3]) * self.frame_dt # control input to control angular velocity
-        body_qdd_cmd_W[:, 3:6] = gain_p_lin * (body_qd_desired_W[:, 3:6] - body_qd[:, 3:6]) * self.frame_dt # control input to control linear velocity
+        # low-pass filtering on measured accelerations
+        alpha_lp = self.indi_alpha_lp
+        indi_lin_acc_meas_lp = prev_indi_lin_acc_meas_lp + alpha_lp * (lin_acc_W_meas - prev_indi_lin_acc_meas_lp)
+        indi_ang_acc_meas_lp = prev_indi_ang_acc_meas_lp + alpha_lp * (ang_acc_B_meas - prev_indi_ang_acc_meas_lp)
+        x_dot_meas = torch.cat((indi_lin_acc_meas_lp, indi_ang_acc_meas_lp), dim=1)
 
-        # Get mass and inertia tensors (convert to torch first, then index)
-        all_masses = wp.to_torch(self.model.body_mass)  # Convert full array to torch
-        all_inertias = wp.to_torch(self.model.body_inertia)  # Convert full array to torch
-        
-        # Now index with torch tensors
+        # Control effectiveness matrix A: [a_W, alpha_B] = A @ omega_sq
+        all_masses = wp.to_torch(self.model.body_mass)
+        all_inertias = wp.to_torch(self.model.body_inertia)
         drone_indices_torch = wp.to_torch(self.sim_view._drone_indices_wp)
-        m = all_masses[drone_indices_torch]  # shape: (num_envs,)
-        I_b = all_inertias[drone_indices_torch]  # shape: (num_envs, 3, 3)
-       
-        # mass matrix
-        num_envs = m.shape[0]
-        M = torch.zeros((num_envs, 6, 6), device=self.device, dtype=m.dtype)
-        M[:, 3, 3] = m  # m for x translation
-        M[:, 4, 4] = m  # m for y translation  
-        M[:, 5, 5] = m  # m for z translation
-        M[:, :3, :3] = I_b
-      
-        # intrinsic forces in world frame
-        f_W = torch.zeros((self.num_envs, 6), device=self.device, dtype=body_qd.dtype)
-        f_W[:, 0:3] = torch.cross(omega_body_W, (I_b @ omega_body_W[:, 0:, None]).squeeze(-1), dim=1) # rotational
-        f_W[:, 3:6] = m[:,None] * torch.tensor([0.0, self.gravity, 0.0], device=self.device)[None,:] # translational        
+        m = all_masses[drone_indices_torch]
+        I_b = all_inertias[drone_indices_torch]
 
-        # input force and wrench mapping
-        F_B = wp.to_torch(self._drone_force_torque_mapping[0:3, :])[None,:,:].expand(self.num_envs, -1, -1)
-        Tau_B = wp.to_torch(self._drone_force_torque_mapping[3:6, :])[None,:,:].expand(self.num_envs, -1, -1)
-
-        # transform input force mapping to world frame
+        A = torch.zeros((self.num_envs, 6, 6), device=self.device, dtype=body_qd.dtype)
+        # Build world-frame translational map from per-motor body forces
+        F_B = wp.to_torch(self._drone_force_torque_mapping[0:3, :])[None, :, :].expand(self.num_envs, -1, -1)
         F_W = torch.zeros_like(F_B)
-        for i in range(F_B.shape[2]):  # For each of the 6 force vectors
-            F_W[:, :, i] = quat_rotate(body_q[:, 3:7], F_B[:, :, i])
-      
-        J = torch.zeros((num_envs, 6, 6), device=self.device, dtype=body_qd.dtype)
-        J[:, 0:3, :] = Tau_B
-        J[:, 3:6, :] = F_W
+        for motor_idx in range(F_B.shape[2]):
+            F_W[:, :, motor_idx] = quat_rotate(quat_current, F_B[:, :, motor_idx])
+        A[:, 0:3, :] = F_W / m[:, None, None]
+        A[:, 3:6, :] = torch.linalg.inv(I_b) @ wp.to_torch(self._drone_force_torque_mapping[3:6, :])[None, :, :].expand(self.num_envs, -1, -1)
 
-        # Solve: u = pinv(F_world) @ ((M @ body_qdd_cmd) - f_W)
-        rhs = (M @ body_qdd_cmd_W[:,:,None]) - f_W[:,:,None]
-        rpm_cmd = torch.linalg.pinv(J) @ rhs       
-        rpm_cmd = torch.sign(rpm_cmd) * torch.sqrt(torch.abs(rpm_cmd)) / (self.max_rpm * 2 * math.pi / 60)
-        rpm_cmd = torch.clamp(rpm_cmd, -1.0, 1.0)        
+        # INDI: Δu = pinv(A) (ν - x_dot_meas), u_k = u_{k-1} + k * Δu
+        delta_omega_sq = (torch.linalg.pinv(A) @ (nu - x_dot_meas).unsqueeze(-1)).squeeze(-1)
+        delta_omega_sq = torch.nan_to_num(delta_omega_sq)
 
-        self.last_power_draw = torch.sum(rpm_cmd**2, dim=1).squeeze() / 6.0  # normalized power draw (0 to 1)
-        self.control.assign("body_force", rpm_cmd.squeeze(-1))
+        max_omega = self.max_rpm * 2.0 * math.pi / 60.0
+        max_omega_sq = max_omega ** 2
+        max_delta_omega_sq = self.indi_max_delta_ratio * max_omega_sq
+        delta_omega_sq = torch.clamp(delta_omega_sq, -max_delta_omega_sq, max_delta_omega_sq)
+        indi_omega_sq_cmd = prev_indi_omega_sq_cmd + self.indi_k * delta_omega_sq
+
+        cmd_min = self.action_limits[:, 0].to(device=self.device, dtype=indi_omega_sq_cmd.dtype)
+        cmd_max = self.action_limits[:, 1].to(device=self.device, dtype=indi_omega_sq_cmd.dtype)
+        omega_sq_min = torch.sign(cmd_min) * torch.square(torch.abs(cmd_min) * max_omega)
+        omega_sq_max = torch.sign(cmd_max) * torch.square(torch.abs(cmd_max) * max_omega)
+        lower_omega_sq = torch.minimum(omega_sq_min, omega_sq_max).unsqueeze(0)
+        upper_omega_sq = torch.maximum(omega_sq_min, omega_sq_max).unsqueeze(0)
+        indi_omega_sq_cmd = torch.maximum(torch.minimum(indi_omega_sq_cmd, upper_omega_sq), lower_omega_sq)
+        indi_omega_sq_cmd = torch.nan_to_num(indi_omega_sq_cmd)
+
+        rpm_cmd = torch.sign(indi_omega_sq_cmd) * torch.sqrt(torch.abs(indi_omega_sq_cmd)) / max_omega
+        lower_cmd = torch.minimum(cmd_min, cmd_max).unsqueeze(0)
+        upper_cmd = torch.maximum(cmd_min, cmd_max).unsqueeze(0)
+        rpm_cmd = torch.maximum(torch.minimum(rpm_cmd, upper_cmd), lower_cmd)
+        rpm_cmd = torch.nan_to_num(rpm_cmd).clone()
+
+        self.last_power_draw = (torch.sum(rpm_cmd**2, dim=1).squeeze() / 6.0).detach()
+        self.control.assign("body_force", rpm_cmd.clone())
+
+        self._indi_omega_sq_cmd = indi_omega_sq_cmd.detach().clone()
+        self._indi_prev_lin_vel_W = lin_vel_W.detach().clone()
+        self._indi_prev_ang_vel_B = ang_vel_B.detach().clone()
+        self._indi_lin_acc_meas_lp = indi_lin_acc_meas_lp.detach().clone()
+        self._indi_ang_acc_meas_lp = indi_ang_acc_meas_lp.detach().clone()
 
     def compute_depth_observations(self, model, state):
         if not self.use_depth_observations:
@@ -1895,6 +2043,7 @@ class DroneParcour(WarpEnv):
                 model.shape_transform,
                 model.shape_geo,
                 self.indices_shape_with_collision,
+                int(len(self.indices_shape_with_collision)),
                 self._cam_dirs_local_wp,
                 self._cam_pos_local_wp,
                 float(self.cam_min_depth),
@@ -1940,43 +2089,47 @@ class DroneParcour(WarpEnv):
         return acc_imu_B, gyro_imu_B        
     
     def compute_observations(self):
-        """Observations: pos, up-axis, vel, body-rates, target unit vector, target distance, last actions"""
+        """Body-centric observations for target tracking and stabilization."""
         # Get drone states using the simulation view
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
-        # target up-axis in world frame
-        target_up_axis_W = quat_rotate(self.target_body_q[:, 3:7], torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
-        target_up_axis_B = quat_rotate(quat_conjugate(body_q[:, 3:7]), target_up_axis_W)
+        quat_body_WB = body_q[:, 3:7]
+        quat_body_BW = quat_conjugate(quat_body_WB)
 
-        # target heading and target distance
-        pos_err_B = quat_rotate(quat_conjugate(body_q[:, 3:7]), self.target_body_q[:, 0:3] - body_q[:, 0:3])
-        target_dist = torch.norm(pos_err_B, dim=1)[:,None]
-        target_dir_B = pos_err_B / torch.clamp(target_dist, min=0.1)
+        lin_vel_W = body_qd[:, 3:6]
+        ang_vel_B = body_qd[:, 0:3]
+        lin_vel_B = quat_rotate(quat_body_BW, lin_vel_W)
 
-        # Compute IMU readings (accelerometer and gyroscope)
-        drone_idx = wp.to_torch(self.sim_view._drone_indices_wp)
-        # body_f = wp.to_torch(self.state_0_bwd.body_f)[drone_idx]
-        body_f = wp.to_torch(self.state_0.body_f)[drone_idx]
-        body_mass = wp.to_torch(self.model.body_mass)[drone_idx]
-        linAcc_body_B, angRates_body_B = self.compute_imu_readings(body_q, body_qd, body_f, body_mass)
+        world_up_W = torch.tensor([0.0, 1.0, 0.0], device=self.device, dtype=body_q.dtype).expand(self.num_envs, -1)
+        world_up_B = quat_rotate(quat_body_BW, world_up_W)
+
+        pos_err_W = self.target_body_q[:, 0:3] - body_q[:, 0:3]
+        pos_err_B = quat_rotate(quat_body_BW, pos_err_W)
+
+        rel_target_lin_vel_W = self.target_body_qd[:, 3:6] - lin_vel_W
+        rel_target_lin_vel_B = quat_rotate(quat_body_BW, rel_target_lin_vel_W)
+
+        target_quat_WT = self.target_body_q[:, 3:7]
+        target_attitude_error_B = quat_error_to_axis_angle(quat_mul(quat_body_BW, target_quat_WT))
 
         # purely body centric observations
         obs_parts = [
-            linAcc_body_B / 9.81,
-            angRates_body_B,
-            target_dist, 
-            target_dir_B,
-            target_up_axis_B
+            lin_vel_B,
+            ang_vel_B,
+            world_up_B,
+            pos_err_B,
+            rel_target_lin_vel_B,
+            target_attitude_error_B,
+            self.last_actor_cmd,
         ]
 
         obs = torch.cat(obs_parts, dim=-1)
 
         # data hygiene
-        nan_mask = torch.isnan(obs)
-        if torch.any(nan_mask):
-            print("NaN detected in observations")
-            print(obs)
-        obs = torch.where(nan_mask, torch.randn_like(obs) * 0.1, obs)
+        finite_mask = torch.isfinite(obs)
+        if not torch.all(finite_mask):
+            print("Non-finite detected in observations")
+        obs = torch.where(finite_mask, obs, torch.zeros_like(obs))
         obs = torch.clamp(obs, -2e1, 2e1)      
         
         # visual_obs = (wp.to_torch(self._cam_depths_wp) - self.cam_min_depth) / (self.cam_max_depth - self.cam_min_depth)
@@ -1987,7 +2140,7 @@ class DroneParcour(WarpEnv):
             }
             self.obs_buf = obs_dict
         else:
-            self.obs_buf = obs
+            self.obs_buf = {'obs': obs}
 
     def create_obs_space(self, num_obs_dict):                
         vector_obs_size = num_obs_dict.get('obs', 16)
@@ -2019,55 +2172,71 @@ class DroneParcour(WarpEnv):
         body_q, body_qd = self.sim_view.get_drone_states(self.state)
 
         pos = body_q[:,0:3]
+        pos_local = pos - self.env_offsets if not self.no_env_offset else pos
 
         # target state mismatch      
         pos_err_norm = torch.norm(self.target_body_q[:, :3] - body_q[:, :3], dim=1)
-        vel_err_norm = torch.norm(self.target_body_qd[:, 3:6] - body_qd[:, 3:6], dim=1)
-        ang_vel_err = torch.norm(self.target_body_qd[:, :3] - body_qd[:, :3], dim=1)
+        lin_speed = torch.linalg.norm(body_qd[:, 3:6], dim=1)
 
         # ===================== Arena Boundary Barriers =========================
         arena_mins = self.arena_bounds[:, 0]  # [x_min, y_min, z_min]
         arena_maxs = self.arena_bounds[:, 1]  # [x_max, y_max, z_max]
         start_penalizing_before_arenabounds = 0.5  # meters before hitting the boundary
-        beta_softplus_arenabounds = 3.0 # the higher the sharper the corner
+        beta_softplus_arenabounds = 1.0 # the higher the sharper the corner
 
         # how much outside of the arena is the drone?
-        dist_to_min = arena_mins - pos
-        dist_to_max = pos - arena_maxs
+        dist_to_min = arena_mins - pos_local
+        dist_to_max = pos_local - arena_maxs
 
         how_much_outside, _ = torch.max(torch.cat((dist_to_min, dist_to_max), dim=1), dim=1)
-        outside_penalty = -1.0 * torch.nn.functional.softplus(how_much_outside + start_penalizing_before_arenabounds, beta=beta_softplus_arenabounds)
+        outside_penalty = -2.0 * torch.nn.functional.softplus(how_much_outside + start_penalizing_before_arenabounds, beta=beta_softplus_arenabounds)
 
         action_penalty = (
-            -0.01 * torch.sum(self.last_actor_cmd[:, :3]**2, dim=-1) + # lin vel cmd pealty
-            -0.2 * torch.abs(self.last_actor_cmd[:, 3]) # yaw rate cmd penalty
+            -0.002 * torch.sum(self.last_actor_cmd[:, :3]**2, dim=-1)
+            -0.002 * torch.sum(self.last_actor_cmd[:, 3:6]**2, dim=-1)
         )
 
         # ===================== Target =========================                   
-        target_proximity_reward = 1.0 / (1.0 + pos_err_norm)   
+        clipped_pos_err = torch.clamp(pos_err_norm, max=5.0)
+        position_tracking_penalty = -0.25 * clipped_pos_err**2
 
-        distance_gate = 1.0 / (1.0 + pos_err_norm**2)    
-
-        target_rate_mismatch_penalty = - distance_gate * torch.exp(0.1 * ang_vel_err)
-        target_rate_mismatch_penalty = torch.clamp(target_rate_mismatch_penalty, min=-5.0)
+        clipped_lin_speed = torch.clamp(lin_speed, max=10.0)
+        velocity_penalty = -0.05 * clipped_lin_speed**2
 
         # body up-axis in world frame
-        body_up_axis = quat_rotate(body_q[:, 3:7], torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))        
+        quat_body = normalize(body_q[:, 3:7])
+        quat_target = normalize(self.target_body_q[:, 3:7])
+
+        world_up = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1)
+        world_forward = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
+
+        body_up_axis = quat_rotate(quat_body, world_up)
         # target up-axis in world frame
-        target_up_axis = quat_rotate(self.target_body_q[:, 3:7], torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1))
-        
-        orientation_reward = 0.1 * distance_gate * (1.0 + (body_up_axis[:,None,:] @ target_up_axis[:,:,None]).squeeze())
+        target_up_axis = quat_rotate(quat_target, world_up)
+        body_forward_axis = quat_rotate(quat_body, world_forward)
+        target_forward_axis = quat_rotate(quat_target, world_forward)
+
+        upright_alignment = torch.clamp(torch.sum(body_up_axis * target_up_axis, dim=1), -1.0, 1.0)
+        forward_alignment = torch.clamp(torch.sum(body_forward_axis * target_forward_axis, dim=1), -1.0, 1.0)
+        quat_alignment = torch.clamp(torch.abs(torch.sum(quat_body * quat_target, dim=1)), 0.0, 1.0)
+
+        upright_misalignment = 1.0 - upright_alignment
+        forward_misalignment = 1.0 - forward_alignment
+        full_attitude_misalignment = 1.0 - quat_alignment**2
+        orientation_penalty = (
+            -3.0 * upright_misalignment
+            -1.5 * forward_misalignment
+            -2.0 * full_attitude_misalignment
+        )
 
         # ======================= Exploration ===============================
         dist_from_start = torch.norm(pos - self.spawn_positions, dim=1)
         dist_start_goal = torch.norm(self.target_body_q[:, :3] - self.spawn_positions, dim=1)
         exploration_reward = 0.2 * (1.0 - 1.0 / (1.0 + 10.0 * dist_from_start / (dist_start_goal + 1e-6)))
 
-        # ====================== Angular Speed Barrier =========================
         ang_speed = torch.linalg.norm(body_qd[:, :3], dim=1)
-        max_ang_speed = 1.0  # rad/s
-        ratelimit_penalty = -(torch.exp(ang_speed / max_ang_speed) - 1.0)
-        ratelimit_penalty = torch.clamp(ratelimit_penalty, min=-5.0)
+        clipped_ang_speed = torch.clamp(ang_speed, max=10.0)
+        angular_velocity_penalty = -0.1 * clipped_ang_speed**2
 
         # ===================== Collision Barrier =========================        
         max_collision_penalty = 1.0
@@ -2078,19 +2247,18 @@ class DroneParcour(WarpEnv):
         else:
             collision_penalty = 0.0
 
-        progress_reward = 0.01 * self.progress_buf
+        survival_reward = torch.ones_like(pos_err_norm) * 2.0
         
         reward = (
-            # -pos_err_norm * 1.0 
-            + target_proximity_reward
-            + exploration_reward
-            # + target_rate_mismatch_penalty     
-            # + orientation_reward 
-            # + outside_penalty             
-            # + collision_penalty
-            # + action_penalty
-            # + orientation_penalty
-            # + progress_reward
+            survival_reward
+            + position_tracking_penalty
+            + velocity_penalty
+            + angular_velocity_penalty
+            + 0.25 * orientation_penalty
+            # + exploration_reward
+            + outside_penalty
+            + collision_penalty
+            + action_penalty
         )
 
         # data hygiene
@@ -2121,8 +2289,8 @@ class DroneParcour(WarpEnv):
             terminated = is_too_fast | is_colliding | is_way_outside
             reset = torch.where(terminated, torch.ones_like(reset), reset)
 
-            # reward[terminated] -= 1.0 # termination penalty            
+            reward = torch.where(terminated, reward - 25.0, reward)
         else:
-            terminated = torch.where(torch.zeros_like(reset), torch.ones_like(reset), reset)
+            terminated = torch.zeros_like(reset)
 
         self.rew_buf, self.reset_buf, self.terminated_buf, self.truncated_buf = reward, reset, terminated, truncated
